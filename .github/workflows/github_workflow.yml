@@ -27,51 +27,66 @@ on:
 jobs:
   process-videos:
     runs-on: ubuntu-latest
+    timeout-minutes: 180  # 3 ساعات حد أقصى
     
     steps:
-    - name: Checkout repository
+    - name: 📥 Checkout repository
       uses: actions/checkout@v4
     
-    - name: Set up Python
+    - name: 🐍 Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
     
-    - name: Install system dependencies
+    - name: ⚙️ Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg python3-pip jq
+        sudo apt-get install -y ffmpeg python3-pip curl jq
     
-    - name: Install Python dependencies
+    - name: 📦 Install Python dependencies
       run: |
+        pip install --upgrade pip
         pip install -r requirements.txt
     
-    - name: Create config file
+    - name: ⚙️ Create configuration file
       run: |
-        # Create JSON config file safely
-        CONFIG_FILE="series_config.json"
-        echo '{' > "$CONFIG_FILE"
-        echo '  "series_name": "'"${{ github.event.inputs.series_name }}"'",' >> "$CONFIG_FILE"
-        echo '  "series_name_arabic": "'"${{ github.event.inputs.series_name_arabic }}"'",' >> "$CONFIG_FILE"
-        echo '  "season_num": '"${{ github.event.inputs.season_num }}"',' >> "$CONFIG_FILE"
-        echo '  "start_episode": '"${{ github.event.inputs.start_episode }}"',' >> "$CONFIG_FILE"
-        echo '  "end_episode": '"${{ github.event.inputs.end_episode }}"'' >> "$CONFIG_FILE"
-        echo '}' >> "$CONFIG_FILE"
+        echo "📝 Creating series_config.json..."
         
-        # Display created config
-        echo "Created configuration:"
-        cat "$CONFIG_FILE"
+        # إنشاء ملف JSON بشكل آمن
+        cat > series_config.json << 'EOF'
+        {
+          "series_name": "${{ github.event.inputs.series_name }}",
+          "series_name_arabic": "${{ github.event.inputs.series_name_arabic }}",
+          "season_num": ${{ github.event.inputs.season_num }},
+          "start_episode": ${{ github.event.inputs.start_episode }},
+          "end_episode": ${{ github.event.inputs.end_episode }}
+        }
+        EOF
+        
+        echo "✅ Configuration file created:"
+        cat series_config.json
     
-    - name: Run video processor
+    - name: 🚀 Run video processor
       env:
         API_ID: ${{ secrets.API_ID }}
         API_HASH: ${{ secrets.API_HASH }}
         CHANNEL: ${{ secrets.CHANNEL }}
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
+        echo "🔍 Checking environment variables..."
+        echo "API_ID: $API_ID"
+        echo "API_HASH: ${API_HASH:0:10}..."
+        echo "CHANNEL: $CHANNEL"
+        echo "STRING_SESSION length: ${#STRING_SESSION} characters"
+        
+        echo "🚀 Starting video processor..."
         python main.py 2>&1 | tee processing.log
-    
-    - name: Upload processing logs
+        
+        # حفظ حالة الخروج
+        EXIT_CODE=${PIPESTATUS[0]}
+        echo "EXIT_CODE=$EXIT_CODE" >> $GITHUB_ENV
+        
+    - name: 📤 Upload logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
@@ -79,3 +94,15 @@ jobs:
         path: |
           processing.log
           series_config.json
+          downloads_*/
+        retention-days: 7
+    
+    - name: ❌ Handle failure
+      if: failure()
+      run: |
+        echo "❌ Workflow failed!"
+        echo "💡 Troubleshooting steps:"
+        echo "1. Check STRING_SESSION is valid"
+        echo "2. Verify channel permissions"
+        echo "3. Check internet connectivity"
+        echo "4. Look at the logs above for specific errors"
