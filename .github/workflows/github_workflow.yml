@@ -1,0 +1,77 @@
+name: Video Processor
+
+on:
+  workflow_dispatch:
+    inputs:
+      series_name:
+        description: 'Series name (English)'
+        required: true
+        default: 'the-protector'
+      series_name_arabic:
+        description: 'Series name (Arabic)'
+        required: true
+        default: 'المحافظ'
+      season_num:
+        description: 'Season number'
+        required: true
+        default: '2'
+      start_episode:
+        description: 'Start episode'
+        required: true
+        default: '1'
+      end_episode:
+        description: 'End episode'
+        required: true
+        default: '8'
+
+jobs:
+  process-videos:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+    
+    - name: Install Python dependencies
+      run: |
+        pip install -r requirements.txt
+    
+    - name: Create config file
+      run: |
+        cat > series_config.json << EOF
+        {
+            "series_name": "${{ github.event.inputs.series_name }}",
+            "series_name_arabic": "${{ github.event.inputs.series_name_arabic }}",
+            "season_num": ${{ github.event.inputs.season_num }},
+            "start_episode": ${{ github.event.inputs.start_episode }},
+            "end_episode": ${{ github.event.inputs.end_episode }}
+        }
+        EOF
+    
+    - name: Run video processor
+      env:
+        API_ID: ${{ secrets.API_ID }}
+        API_HASH: ${{ secrets.API_HASH }}
+        CHANNEL: ${{ secrets.CHANNEL }}
+        STRING_SESSION: ${{ secrets.STRING_SESSION }}
+      run: |
+        python main.py
+    
+    - name: Upload logs
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: processing-logs
+        path: |
+          *.log
+          downloads_*/
