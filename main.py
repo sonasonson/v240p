@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Telegram Video Downloader & Uploader - Fixed Session Issue
+Telegram Video Downloader & Uploader - Complete Version
 """
 
 import os
@@ -148,7 +148,12 @@ async def setup_telegram():
                 member = await app.get_chat_member(TELEGRAM_CHANNEL, me.id)
                 print(f"👤 Role: {member.status}")
                 
-                if member.status not in ["creator", "administrator", "member"]:
+                if hasattr(member.status, 'value'):
+                    role = member.status.value
+                else:
+                    role = str(member.status)
+                
+                if role not in ["creator", "administrator", "member", "owner"]:
                     print("⚠️ Warning: You may not have upload permissions")
                     
             except:
@@ -188,9 +193,350 @@ async def setup_telegram():
         return False
 
 # ===== VIDEO PROCESSING FUNCTIONS =====
-# (ابقاء نفس دوال معالجة الفيديو كما هي في الكود السابق)
-# download_video, compress_video, create_thumbnail, upload_video, process_episode
-# ... [نفس دوال معالجة الفيديو من الإصدار السابق] ...
+
+def extract_video_url(episode_num, series_name, season_num):
+    """Extract video URL from 3seq"""
+    try:
+        if season_num > 1:
+            base_url = f"https://x.3seq.com/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
+        else:
+            base_url = f"https://x.3seq.com/video/modablaj-{series_name}-episode-{episode_num:02d}"
+        
+        print(f"🔗 Fetching: {base_url}")
+        
+        response = requests.get(base_url, headers=HEADERS, timeout=30)
+        if response.status_code != 200:
+            return None, f"HTTP {response.status_code}"
+        
+        # Find watch link
+        watch_match = re.search(r'href=["\']([^"\']+episode[^"\']+\?do=watch)["\']', response.text)
+        if watch_match:
+            watch_url = watch_match.group(1)
+            if watch_url.startswith('//'):
+                watch_url = 'https:' + watch_url
+            elif watch_url.startswith('/'):
+                watch_url = 'https://x.3seq.com' + watch_url
+        else:
+            watch_url = f"{base_url}-yvra/?do=watch"
+        
+        # Get video iframe
+        response = requests.get(watch_url, headers=HEADERS, timeout=30)
+        iframe_match = re.search(r'<iframe[^>]+src="([^"]+)"', response.text)
+        
+        if not iframe_match:
+            return None, "No video iframe found"
+        
+        video_url = iframe_match.group(1)
+        if video_url.startswith('//'):
+            video_url = 'https:' + video_url
+        elif video_url.startswith('/'):
+            video_url = 'https://v.vidsp.net' + video_url
+        
+        return video_url, "✅ URL extracted"
+        
+    except requests.exceptions.Timeout:
+        return None, "⏰ Timeout"
+    except Exception as e:
+        return None, f"❌ Error: {str(e)}"
+
+def download_video(url, output_path):
+    """Download video using yt-dlp"""
+    try:
+        ydl_opts = {
+            'format': 'best[height<=720]/best',
+            'outtmpl': output_path,
+            'quiet': True,
+            'no_warnings': True,
+            'user_agent': USER_AGENT,
+            'referer': 'https://v.vidsp.net/',
+            'http_headers': HEADERS,
+            'retries': 10,
+            'fragment_retries': 10,
+            'skip_unavailable_fragments': True,
+            'socket_timeout': 30,
+        }
+        
+        print(f"📥 Downloading...")
+        start = time.time()
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+        
+        elapsed = time.time() - start
+        
+        if os.path.exists(output_path):
+            size = os.path.getsize(output_path) / (1024*1024)
+            print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
+            return True
+        
+        # Try different extensions
+        base = os.path.splitext(output_path)[0]
+        for ext in ['.mp4', '.mkv', '.webm', '.avi']:
+            alt_file = base + ext
+            if os.path.exists(alt_file):
+                shutil.move(alt_file, output_path)
+                size = os.path.getsize(output_path) / (1024*1024)
+                print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
+                return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"❌ Download error: {e}")
+        return False
+
+def compress_video(input_file, output_file):
+    """Compress video to 240p"""
+    if not os.path.exists(input_file):
+        print(f"❌ File not found: {input_file}")
+        return False
+    
+    original_size = os.path.getsize(input_file) / (1024 * 1024)
+    print(f"🎬 Compressing video...")
+    print(f"📊 Original: {original_size:.1f}MB")
+    
+    cmd = [
+        'ffmpeg',
+        '-i', input_file,
+        '-vf', 'scale=-2:240',
+        '-c:v', 'libx264',
+        '-crf', '28',
+        '-preset', 'veryfast',
+        '-c:a', 'aac',
+        '-b:a', '64k',
+        '-y',
+        output_file
+    ]
+    
+    try:
+        start = time.time()
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0 and os.path.exists(output_file):
+            new_size = os.path.getsize(output_file) / (1024 * 1024)
+            elapsed = time.time() - start
+            reduction = ((original_size - new_size) / original_size) * 100
+            
+            print(f"✅ Compressed in {elapsed:.1f}s")
+            print(f"📊 New size: {new_size:.1f}MB (-{reduction:.1f}%)")
+            return True
+        else:
+            print(f"❌ Compression failed")
+            if result.stderr:
+                print(f"Error: {result.stderr[:200]}")
+            return False
+    except Exception as e:
+        print(f"❌ Compression error: {e}")
+        return False
+
+def create_thumbnail(input_file, thumbnail_path):
+    """Create thumbnail from video"""
+    try:
+        print(f"🖼️ Creating thumbnail...")
+        
+        cmd = [
+            'ffmpeg',
+            '-i', input_file,
+            '-ss', '00:00:05',
+            '-vframes', '1',
+            '-s', '320x180',
+            '-f', 'image2',
+            '-y',
+            thumbnail_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0 and os.path.exists(thumbnail_path):
+            size = os.path.getsize(thumbnail_path) / 1024
+            print(f"✅ Thumbnail created ({size:.1f}KB)")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"❌ Thumbnail error: {e}")
+        return False
+
+def get_video_dimensions(input_file):
+    """Get video dimensions"""
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'quiet',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height',
+            '-of', 'csv=p=0',
+            input_file
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            dimensions = result.stdout.strip().split(',')
+            if len(dimensions) == 2:
+                return int(dimensions[0]), int(dimensions[1])
+    except:
+        pass
+    
+    return 426, 240  # Default for 240p
+
+def get_video_duration(input_file):
+    """Get video duration in seconds"""
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            input_file
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return int(float(result.stdout.strip()))
+    except:
+        pass
+    
+    return 0
+
+async def upload_video(file_path, caption, thumbnail_path=None):
+    """Upload video to Telegram channel"""
+    try:
+        if not app or not os.path.exists(file_path):
+            return False
+        
+        filename = os.path.basename(file_path)
+        file_size = os.path.getsize(file_path) / (1024*1024)
+        
+        print(f"☁️ Uploading: {filename}")
+        print(f"📊 Size: {file_size:.1f}MB")
+        
+        # Get video dimensions
+        width, height = get_video_dimensions(file_path)
+        
+        # Get duration
+        duration = get_video_duration(file_path)
+        
+        # Prepare upload
+        upload_params = {
+            'chat_id': TELEGRAM_CHANNEL,
+            'video': file_path,
+            'caption': caption,
+            'supports_streaming': True,
+            'width': width,
+            'height': height,
+            'duration': duration,
+        }
+        
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            upload_params['thumb'] = thumbnail_path
+        
+        # Upload with progress
+        start_time = time.time()
+        last_percent = 0
+        
+        def progress(current, total):
+            nonlocal last_percent
+            percent = (current / total) * 100
+            if percent - last_percent >= 5 or percent == 100:
+                speed = current / (time.time() - start_time) / 1024 if (time.time() - start_time) > 0 else 0
+                print(f"📤 {percent:.0f}% - {speed:.0f}KB/s")
+                last_percent = percent
+        
+        upload_params['progress'] = progress
+        
+        # Upload
+        try:
+            await app.send_video(**upload_params)
+            elapsed = time.time() - start_time
+            print(f"✅ Uploaded in {elapsed:.1f}s")
+            print(f"🎬 Streaming: Enabled (pauses on exit)")
+            return True
+            
+        except FloodWait as e:
+            print(f"⏳ Flood wait: {e.value}s")
+            await asyncio.sleep(e.value)
+            return await upload_video(file_path, caption, thumbnail_path)
+            
+        except Exception as e:
+            print(f"❌ Upload error: {e}")
+            # Try without progress callback
+            try:
+                upload_params.pop('progress', None)
+                await app.send_video(**upload_params)
+                print(f"✅ Upload successful")
+                return True
+            except Exception as e2:
+                print(f"❌ Retry failed: {e2}")
+                return False
+        
+    except Exception as e:
+        print(f"❌ Upload failed: {e}")
+        return False
+
+async def process_episode(episode_num, series_name, series_name_arabic, season_num, download_dir):
+    """Process a single episode"""
+    print(f"\n{'─'*50}")
+    print(f"🎬 Episode {episode_num:02d}")
+    print(f"{'─'*50}")
+    
+    temp_file = os.path.join(download_dir, f"temp_{episode_num:02d}.mp4")
+    final_file = os.path.join(download_dir, f"final_{episode_num:02d}.mp4")
+    thumbnail_file = os.path.join(download_dir, f"thumb_{episode_num:02d}.jpg")
+    
+    # Clean old files
+    for f in [temp_file, final_file, thumbnail_file]:
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+            except:
+                pass
+    
+    try:
+        # 1. Extract URL
+        print("🔍 Extracting video URL...")
+        video_url, message = extract_video_url(episode_num, series_name, season_num)
+        
+        if not video_url:
+            return False, f"URL extraction failed: {message}"
+        
+        print(f"{message}")
+        
+        # 2. Download
+        print("📥 Downloading video...")
+        if not download_video(video_url, temp_file):
+            return False, "Download failed"
+        
+        # 3. Create thumbnail
+        print("🖼️ Creating thumbnail...")
+        create_thumbnail(temp_file, thumbnail_file)
+        
+        # 4. Compress
+        print("🎬 Compressing video...")
+        if not compress_video(temp_file, final_file):
+            print("⚠️ Compression failed, using original")
+            shutil.copy2(temp_file, final_file)
+        
+        # 5. Upload
+        caption = f"{series_name_arabic} الموسم {season_num} الحلقة {episode_num}"
+        thumb = thumbnail_file if os.path.exists(thumbnail_file) else None
+        
+        if await upload_video(final_file, caption, thumb):
+            # 6. Clean up
+            for file_path in [temp_file, final_file, thumbnail_file]:
+                if os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                        print(f"🗑️ Deleted: {os.path.basename(file_path)}")
+                    except:
+                        pass
+            return True, "✅ Uploaded and cleaned"
+        else:
+            return False, "❌ Upload failed"
+        
+    except Exception as e:
+        print(f"❌ Processing error: {e}")
+        return False, str(e)
 
 # ===== MAIN FUNCTION =====
 
