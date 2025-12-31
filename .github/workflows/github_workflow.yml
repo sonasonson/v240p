@@ -30,17 +30,17 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
     
     - name: Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg
+        sudo apt-get install -y ffmpeg python3-pip jq
     
     - name: Install Python dependencies
       run: |
@@ -48,15 +48,19 @@ jobs:
     
     - name: Create config file
       run: |
-        cat > series_config.json << EOF
-        {
-            "series_name": "${{ github.event.inputs.series_name }}",
-            "series_name_arabic": "${{ github.event.inputs.series_name_arabic }}",
-            "season_num": ${{ github.event.inputs.season_num }},
-            "start_episode": ${{ github.event.inputs.start_episode }},
-            "end_episode": ${{ github.event.inputs.end_episode }}
-        }
-        EOF
+        # Create JSON config file safely
+        CONFIG_FILE="series_config.json"
+        echo '{' > "$CONFIG_FILE"
+        echo '  "series_name": "'"${{ github.event.inputs.series_name }}"'",' >> "$CONFIG_FILE"
+        echo '  "series_name_arabic": "'"${{ github.event.inputs.series_name_arabic }}"'",' >> "$CONFIG_FILE"
+        echo '  "season_num": '"${{ github.event.inputs.season_num }}"',' >> "$CONFIG_FILE"
+        echo '  "start_episode": '"${{ github.event.inputs.start_episode }}"',' >> "$CONFIG_FILE"
+        echo '  "end_episode": '"${{ github.event.inputs.end_episode }}"'' >> "$CONFIG_FILE"
+        echo '}' >> "$CONFIG_FILE"
+        
+        # Display created config
+        echo "Created configuration:"
+        cat "$CONFIG_FILE"
     
     - name: Run video processor
       env:
@@ -65,13 +69,13 @@ jobs:
         CHANNEL: ${{ secrets.CHANNEL }}
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
-        python main.py
+        python main.py 2>&1 | tee processing.log
     
-    - name: Upload logs
+    - name: Upload processing logs
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: processing-logs
         path: |
-          *.log
-          downloads_*/
+          processing.log
+          series_config.json
