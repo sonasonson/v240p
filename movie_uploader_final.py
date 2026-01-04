@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Telegram Movie Uploader - Same as Series Method
+Telegram Movie Uploader - Direct Extraction from Larooza
 """
 
 import os
@@ -12,7 +12,7 @@ import requests
 import subprocess
 import shutil
 import asyncio
-import random
+import cloudscraper
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
@@ -22,7 +22,6 @@ TELEGRAM_API_HASH = os.environ.get("API_HASH", "")
 TELEGRAM_CHANNEL = os.environ.get("CHANNEL", "")
 STRING_SESSION = os.environ.get("STRING_SESSION", "")
 
-# Validate environment variables
 def validate_env():
     errors = []
     
@@ -52,38 +51,6 @@ if not validate_env():
 
 TELEGRAM_API_ID = int(TELEGRAM_API_ID)
 
-# Rotating User Agents to avoid blocking
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Edge/120.0.0.0",
-]
-
-def get_random_headers(referer=None):
-    """Get random headers to avoid blocking"""
-    headers = {
-        'User-Agent': random.choice(USER_AGENTS),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'cross-site',
-        'Sec-Fetch-User': '?1',
-    }
-    
-    if referer:
-        headers['Referer'] = referer
-    else:
-        headers['Referer'] = 'https://www.google.com/'
-    
-    return headers
-
 # ===== IMPORTS =====
 def install_requirements():
     print("📦 Installing requirements...")
@@ -93,8 +60,7 @@ def install_requirements():
         "tgcrypto>=1.2.0",
         "yt-dlp>=2024.4.9",
         "requests>=2.31.0",
-        "brotli",
-        "cloudscraper",
+        "cloudscraper>=1.2.71",
     ]
     
     for req in requirements:
@@ -111,29 +77,8 @@ install_requirements()
 from pyrogram import Client
 from pyrogram.errors import FloodWait, AuthKeyUnregistered
 import yt_dlp
-import cloudscraper
 
 app = None
-scraper = None
-
-# ===== CLOUDSCRAPER SETUP =====
-def setup_scraper():
-    """Setup cloudscraper to bypass CloudFlare"""
-    global scraper
-    print("🛡️ Setting up CloudScraper...")
-    try:
-        scraper = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'mobile': False
-            }
-        )
-        print("✅ CloudScraper ready")
-        return True
-    except Exception as e:
-        print(f"❌ CloudScraper error: {e}")
-        return False
 
 # ===== TELEGRAM SETUP =====
 async def setup_telegram():
@@ -182,196 +127,177 @@ async def setup_telegram():
         print(f"❌ Connection failed: {e}")
         return False
 
-# ===== VIDEO URL EXTRACTION =====
-def extract_movie_url(page_url):
-    """Extract movie URL using same method as series"""
+# ===== EXTRACT VIDEO FROM LAROOZA =====
+def extract_larooza_video(page_url):
+    """Extract video URL from Larooza site"""
     try:
-        print(f"🔍 Extracting from: {page_url}")
+        print(f"🔍 Extracting from Larooza: {page_url}")
         
-        # Parse URL to get base domain
-        parsed = urlparse(page_url)
-        base_domain = f"{parsed.scheme}://{parsed.netloc}"
+        # Use cloudscraper to bypass CloudFlare
+        scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'mobile': False
+            }
+        )
         
-        # Get video ID from URL
-        query_params = parse_qs(parsed.query)
-        vid = query_params.get('vid', [None])[0]
+        # Get main page
+        print("📄 Fetching main page...")
+        response = scraper.get(page_url, timeout=30)
         
-        if not vid:
-            print("❌ No video ID found in URL")
-            return None, "No video ID"
+        if response.status_code != 200:
+            return None, f"Failed to fetch page: {response.status_code}"
         
-        print(f"📹 Video ID: {vid}")
+        # Find iframe
+        iframe_match = re.search(r'<iframe[^>]+src="([^"]+)"', response.text)
+        if not iframe_match:
+            return None, "No iframe found"
         
-        # Try different patterns for direct video URL
-        patterns = [
-            f"{base_domain}/videos/{vid}.mp4",
-            f"{base_domain}/v/{vid}.mp4",
-            f"{base_domain}/video/{vid}.mp4",
-            f"{base_domain}/files/{vid}.mp4",
-            f"{base_domain}/stream/{vid}.m3u8",
-            f"{base_domain}/hls/{vid}.m3u8",
-            f"{base_domain}/{vid}.mp4",
+        iframe_url = iframe_match.group(1)
+        if iframe_url.startswith('//'):
+            iframe_url = 'https:' + iframe_url
+        
+        print(f"🔗 Found iframe: {iframe_url}")
+        
+        # Get iframe content
+        print("📄 Fetching iframe...")
+        iframe_response = scraper.get(iframe_url, timeout=30)
+        
+        if iframe_response.status_code != 200:
+            return None, f"Failed to fetch iframe: {iframe_response.status_code}"
+        
+        # Try to find direct video URL
+        # Pattern 1: Look for jwplayer setup
+        jwplayer_patterns = [
+            r'file["\']?\s*:\s*["\']([^"\']+)["\']',
+            r'sources\s*:\s*\[\s*{[^}]+file["\']?\s*:\s*["\']([^"\']+)["\']',
+            r'jwplayer\([^)]+\)\.setup\(({[^}]+})',
         ]
         
-        # Try to fetch the page first
-        try:
-            headers = get_random_headers(referer=base_domain)
-            response = requests.get(page_url, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                content = response.text
-                
-                # Look for video sources in the page
-                video_patterns = [
-                    r'src=["\']([^"\']+\.mp4[^"\']*)["\']',
-                    r'file["\']?\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
-                    r'video["\']?\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
-                    r'videoSrc["\']?\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
-                    r'source["\']?\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
-                    r'data-video=["\']([^"\']+)["\']',
-                ]
-                
-                for pattern in video_patterns:
-                    matches = re.findall(pattern, content, re.IGNORECASE)
-                    for match in matches:
-                        if isinstance(match, tuple):
-                            video_url = match[0] if len(match) > 0 else None
-                        else:
-                            video_url = match
-                        
-                        if video_url:
-                            # Make URL absolute
-                            if video_url.startswith('//'):
-                                video_url = 'https:' + video_url
-                            elif video_url.startswith('/'):
-                                video_url = base_domain + video_url
-                            elif not video_url.startswith('http'):
-                                video_url = base_domain + '/' + video_url
-                            
-                            print(f"✅ Found video URL in page: {video_url[:80]}...")
-                            return video_url, "Found in page"
-        except Exception as e:
-            print(f"⚠️ Page fetch failed: {e}")
+        for pattern in jwplayer_patterns:
+            matches = re.findall(pattern, iframe_response.text, re.DOTALL | re.IGNORECASE)
+            for match in matches:
+                if isinstance(match, str):
+                    # Try to extract URL from JSON-like string
+                    url_match = re.search(r'file["\']?\s*:\s*["\']([^"\']+)["\']', match)
+                    if url_match:
+                        video_url = url_match.group(1)
+                        if video_url and ('m3u8' in video_url or 'mp4' in video_url):
+                            print(f"✅ Found jwplayer URL: {video_url[:80]}...")
+                            return video_url, "JWPlayer URL found"
         
-        # Try direct patterns
-        for pattern in patterns:
-            try:
-                headers = get_random_headers(referer=base_domain)
-                response = requests.head(pattern, headers=headers, timeout=10, allow_redirects=True)
-                
-                if response.status_code in [200, 302, 307]:
-                    print(f"✅ Found direct URL: {pattern}")
-                    return pattern, "Direct URL found"
-            except:
-                continue
+        # Pattern 2: Look for m3u8 in script tags
+        script_pattern = r'<script[^>]*>([^<]+)</script>'
+        scripts = re.findall(script_pattern, iframe_response.text, re.DOTALL | re.IGNORECASE)
         
-        # Try with CloudScraper if available
-        if scraper:
-            try:
-                print("🛡️ Trying CloudScraper...")
-                response = scraper.get(page_url, timeout=30)
-                if response.status_code == 200:
-                    content = response.text
-                    
-                    # Look for m3u8 or mpd files
-                    m3u8_patterns = [
-                        r'["\'](https?://[^"\']+\.m3u8[^"\']*)["\']',
-                        r'["\'](https?://[^"\']+\.mpd[^"\']*)["\']',
-                        r'hlsManifestUrl["\']?\s*:\s*["\']([^"\']+)["\']',
-                        r'dashManifestUrl["\']?\s*:\s*["\']([^"\']+)["\']',
-                    ]
-                    
-                    for pattern in m3u8_patterns:
-                        matches = re.findall(pattern, content, re.IGNORECASE)
-                        for match in matches:
-                            if match:
-                                print(f"✅ Found streaming URL: {match[:80]}...")
-                                return match, "Streaming URL found"
-            except Exception as e:
-                print(f"❌ CloudScraper failed: {e}")
+        for script in scripts:
+            if 'm3u8' in script or 'master.m3u8' in script:
+                # Look for URL in the script
+                url_pattern = r'(https?://[^\s"\']+\.m3u8[^\s"\']*)'
+                urls = re.findall(url_pattern, script)
+                for url in urls:
+                    if 'master.m3u8' in url or 'index.m3u8' in url:
+                        print(f"✅ Found m3u8 in script: {url[:80]}...")
+                        return url, "m3u8 URL found"
         
-        return None, "Could not extract video URL"
+        # Pattern 3: Look for any video URL
+        video_patterns = [
+            r'(https?://[^\s"\']+\.m3u8[^\s"\']*)',
+            r'(https?://[^\s"\']+\.mp4[^\s"\']*)',
+            r'video["\']?\s*:\s*["\']([^"\']+)["\']',
+            r'src["\']?\s*:\s*["\']([^"\']+)["\']',
+        ]
+        
+        for pattern in video_patterns:
+            matches = re.findall(pattern, iframe_response.text, re.IGNORECASE)
+            for match in matches:
+                if isinstance(match, str):
+                    video_url = match
+                    if ('m3u8' in video_url or 'mp4' in video_url) and 'http' in video_url:
+                        print(f"✅ Found video URL: {video_url[:80]}...")
+                        return video_url, "Video URL found"
+        
+        # If no direct URL found, use yt-dlp on the iframe URL
+        print("⚠️ No direct URL found, using yt-dlp on iframe")
+        return iframe_url, "Using iframe URL"
         
     except Exception as e:
         print(f"❌ Extraction error: {e}")
         return None, str(e)
 
-def download_movie(video_url, output_path):
-    """Download movie with improved method"""
+def download_with_ytdlp(video_url, output_path):
+    """Download using yt-dlp with optimized settings"""
     try:
-        # First extract direct URL
-        direct_url, message = extract_movie_url(video_url)
-        
-        if not direct_url:
-            print("❌ Could not extract direct URL")
-            return False, None
-        
-        print(f"✅ {message}")
-        print(f"🔗 Using URL: {direct_url[:80]}...")
-        
-        # Configure yt-dlp with better settings
+        # Configure yt-dlp
         ydl_opts = {
             'format': 'best[height<=720]/best',
             'outtmpl': output_path,
             'quiet': True,
             'no_warnings': True,
-            'user_agent': random.choice(USER_AGENTS),
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'referer': video_url,
-            'http_headers': get_random_headers(referer=video_url),
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'video',
+                'Sec-Fetch-Mode': 'no-cors',
+                'Sec-Fetch-Site': 'cross-site',
+            },
             'retries': 30,
             'fragment_retries': 30,
             'skip_unavailable_fragments': True,
-            'socket_timeout': 60,
+            'socket_timeout': 120,
             'extractor_args': {
                 'generic': {
-                    'headers': get_random_headers()
+                    'headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Referer': video_url,
+                    }
                 }
             },
-            'concurrent_fragment_downloads': 8,
+            'concurrent_fragment_downloads': 10,
             'continuedl': True,
             'noprogress': True,
             'geo_bypass': True,
             'geo_bypass_country': 'US',
-            'extract_flat': False,
             'ignoreerrors': True,
             'no_check_certificate': True,
-            'sleep_interval': 1,
-            'max_sleep_interval': 5,
-            'windows_filenames': True,
+            'extract_flat': False,
         }
         
-        print("📥 Downloading movie...")
+        print(f"📥 Downloading with yt-dlp...")
+        print(f"🔗 URL: {video_url[:100]}...")
+        
         start = time.time()
         
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(direct_url, download=False)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            try:
+                # Try to get info first
+                info = ydl.extract_info(video_url, download=False)
                 if info:
                     title = info.get('title', 'Unknown')
-                    duration = info.get('duration', 0)
                     print(f"📝 Title: {title}")
-                    if duration > 0:
-                        mins = duration // 60
-                        secs = duration % 60
-                        print(f"⏱️ Duration: {mins}:{secs:02d}")
                     
                     # Download
-                    ydl.download([direct_url])
+                    ydl.download([video_url])
                     actual_title = title
                 else:
-                    ydl.download([direct_url])
+                    ydl.download([video_url])
                     actual_title = "Unknown"
-        except:
-            # Direct download if extraction fails
-            print("⚠️ Info extraction failed, direct download...")
-            ydl_opts['quiet'] = False
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([direct_url])
-            actual_title = "Unknown"
+            except Exception as e:
+                print(f"⚠️ Info extraction failed: {e}")
+                # Try direct download
+                ydl.download([video_url])
+                actual_title = "Unknown"
         
         elapsed = time.time() - start
         
-        # Check if file exists
         if os.path.exists(output_path):
             size = os.path.getsize(output_path) / (1024*1024)
             print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
@@ -379,7 +305,7 @@ def download_movie(video_url, output_path):
         
         # Try different extensions
         base = os.path.splitext(output_path)[0]
-        for ext in ['.mp4', '.mkv', '.webm', '.avi', '.flv', '.mov', '.m4v']:
+        for ext in ['.mp4', '.mkv', '.webm', '.avi', '.flv', '.mov']:
             alt_file = base + ext
             if os.path.exists(alt_file):
                 shutil.move(alt_file, output_path)
@@ -391,60 +317,24 @@ def download_movie(video_url, output_path):
         
     except Exception as e:
         print(f"❌ Download error: {e}")
-        
-        # Alternative: Try direct download with requests if it's a direct link
-        if direct_url and (direct_url.endswith('.mp4') or '.m3u8' in direct_url):
-            print("🔄 Trying alternative download method...")
-            return download_direct(direct_url, output_path)
-        
         return False, None
 
-def download_direct(video_url, output_path):
-    """Direct download for .mp4 or .m3u8"""
+def download_movie_larooza(video_url, output_path):
+    """Download movie from Larooza"""
     try:
-        print("🔄 Direct download...")
-        headers = get_random_headers(referer=video_url)
+        # Extract video URL
+        extracted_url, message = extract_larooza_video(video_url)
         
-        if '.m3u8' in video_url:
-            # Use yt-dlp for m3u8
-            ydl_opts = {
-                'format': 'best',
-                'outtmpl': output_path,
-                'quiet': False,
-                'http_headers': headers,
-                'retries': 20,
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([video_url])
-        else:
-            # Direct download for mp4
-            response = requests.get(video_url, headers=headers, stream=True, timeout=60)
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded = 0
-            
-            with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        
-                        if total_size > 0:
-                            percent = (downloaded / total_size) * 100
-                            print(f"⬇️ {percent:.1f}%", end='\r')
-            
-            print(f"\n✅ Direct download complete")
+        if not extracted_url:
+            return False, None
         
-        if os.path.exists(output_path):
-            size = os.path.getsize(output_path) / (1024*1024)
-            print(f"📊 Size: {size:.1f}MB")
-            return True, "Movie"
+        print(f"✅ {message}")
         
-        return False, None
+        # Download using yt-dlp
+        return download_with_ytdlp(extracted_url, output_path)
+        
     except Exception as e:
-        print(f"❌ Direct download failed: {e}")
+        print(f"❌ Larooza download error: {e}")
         return False, None
 
 # ===== COMPRESSION (SAME AS SERIES) =====
@@ -549,7 +439,7 @@ async def upload_video(file_path, caption, thumbnail_path=None):
         print(f"☁️ Uploading: {filename}")
         print(f"📊 Size: {file_size:.1f}MB")
         
-        # Get video info
+        # Get video dimensions
         try:
             cmd = ['ffprobe', '-v', 'quiet', '-select_streams', 'v:0', 
                    '-show_entries', 'stream=width,height', '-of', 'csv=p=0', file_path]
@@ -562,6 +452,7 @@ async def upload_video(file_path, caption, thumbnail_path=None):
         except:
             width, height = 426, 240
         
+        # Get duration
         try:
             cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', 
                    '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
@@ -644,7 +535,13 @@ async def process_movie(movie_url, movie_title, download_dir):
     try:
         # 1. Download
         print("📥 Downloading movie...")
-        download_success, actual_title = download_movie(movie_url, temp_file)
+        
+        # Check if it's Larooza
+        if 'larooza' in movie_url or 'larozavideo' in movie_url:
+            download_success, actual_title = download_movie_larooza(movie_url, temp_file)
+        else:
+            # Use standard download
+            download_success, actual_title = download_with_ytdlp(movie_url, temp_file)
         
         if not download_success:
             return False, "Download failed"
@@ -686,7 +583,7 @@ async def process_movie(movie_url, movie_title, download_dir):
 # ===== MAIN FUNCTION =====
 async def main():
     print("="*50)
-    print("🎬 Movie Uploader - Fixed Version")
+    print("🎬 Movie Uploader - Larooza Special")
     print("="*50)
     print("⚙️ Same settings as series: 240p, CRF 28")
     print("📝 Caption: Title only (no year)")
@@ -702,9 +599,6 @@ async def main():
         subprocess.run(['sudo', 'apt-get', 'update', '-y'], capture_output=True)
         subprocess.run(['sudo', 'apt-get', 'install', '-y', 'ffmpeg'], capture_output=True)
         print("✅ ffmpeg installed")
-    
-    # Setup CloudScraper
-    setup_scraper()
     
     # Setup Telegram
     print("\n" + "="*50)
@@ -795,7 +689,7 @@ async def main():
         
         # Wait between movies
         if index < len(movies):
-            wait_time = 5
+            wait_time = 3
             print(f"⏳ Waiting {wait_time} seconds...")
             await asyncio.sleep(wait_time)
     
@@ -815,11 +709,11 @@ async def main():
     
     if failed:
         print(f"📝 Failed movies: {failed}")
-        print("\n💡 Solutions for 403 error:")
-        print("1. Try a different video source")
-        print("2. Use direct .mp4 or .m3u8 links")
-        print("3. The site may block GitHub IPs")
-        print("4. Try another movie URL")
+        print("\n💡 Possible solutions:")
+        print("1. Try a different movie URL")
+        print("2. The site might be blocking GitHub Actions")
+        print("3. Try running locally on your computer")
+        print("4. Use a VPN or proxy service")
     
     # Cleanup
     try:
