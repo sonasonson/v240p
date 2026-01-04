@@ -1,21 +1,27 @@
-name: Universal Video Uploader
+name: Content Uploader
 
 on:
   workflow_dispatch:
     inputs:
-      video_url:
-        description: 'Video page URL (required)'
+      content_type:
+        description: 'Content type'
         required: true
-        default: 'https://q.larozavideo.net/play.php?vid=956c7e520'
-      video_title:
-        description: 'Video title'
-        required: true
-        default: 'x مراتي'
+        default: 'movie'
+        type: choice
+        options:
+          - movie
+          - series
+      movie_url:
+        description: 'Movie URL (optional)'
+        required: false
+      movie_title:
+        description: 'Movie title (optional)'
+        required: false
 
 jobs:
-  upload-video:
+  upload-content:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 120
     
     steps:
     - name: 📥 Checkout repository
@@ -36,41 +42,54 @@ jobs:
         pip install --upgrade pip
         pip install -r requirements.txt
     
-    - name: 🎬 Create video config
+    - name: 🎬 Create movie config if custom URL provided
+      if: github.event.inputs.content_type == 'movie' && github.event.inputs.movie_url != ''
       run: |
-        echo "🎬 Creating video_config.json..."
-        cat > video_config.json << 'EOF'
+        echo "🎬 Creating custom movie config..."
+        cat > movie_config.json << 'CONFIG_EOF'
         {
-          "videos": [
+          "movies": [
             {
-              "url": "${{ github.event.inputs.video_url }}",
-              "title": "${{ github.event.inputs.video_title }}"
+              "url": "${{ github.event.inputs.movie_url }}",
+              "title": "${{ github.event.inputs.movie_title || 'Movie' }}"
             }
           ]
         }
-        EOF
+        CONFIG_EOF
         
-        echo "✅ Configuration:"
-        cat video_config.json
+        echo "✅ Config created:"
+        cat movie_config.json
     
-    - name: 🚀 Run universal video uploader
+    - name: 🎬 Run movie uploader
+      if: github.event.inputs.content_type == 'movie'
       env:
         API_ID: ${{ secrets.API_ID }}
         API_HASH: ${{ secrets.API_HASH }}
         CHANNEL: ${{ secrets.CHANNEL }}
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
-        echo "🚀 Starting Universal Video Uploader..."
-        echo "⚙️ Works with any video site..."
+        echo "🚀 Starting Movie Uploader..."
+        echo "⚙️ Using improved extraction method..."
         python universal_video_uploader.py 2>&1 | tee processing.log
+    
+    - name: 📺 Run series uploader
+      if: github.event.inputs.content_type == 'series'
+      env:
+        API_ID: ${{ secrets.API_ID }}
+        API_HASH: ${{ secrets.API_HASH }}
+        CHANNEL: ${{ secrets.CHANNEL }}
+        STRING_SESSION: ${{ secrets.STRING_SESSION }}
+      run: |
+        echo "📺 Starting Series Uploader..."
+        python main.py 2>&1 | tee processing.log
     
     - name: 📤 Upload logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: video-logs-${{ github.run_number }}
+        name: logs-${{ github.event.inputs.content_type }}-${{ github.run_number }}
         path: |
           processing.log
-          video_config.json
-          videos_*/
-        retention-days: 7
+          *_config.json
+          *downloads*/
+        retention-days: 3
