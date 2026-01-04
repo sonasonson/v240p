@@ -2,6 +2,7 @@
 """
 Universal Video Uploader - For Movies
 Works with VK.com and other sites
+With download progress display
 """
 
 import os
@@ -14,6 +15,7 @@ import subprocess
 import shutil
 import asyncio
 import base64
+import threading
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
@@ -52,7 +54,7 @@ TELEGRAM_API_ID = int(TELEGRAM_API_ID)
 
 # Install requirements
 print("📦 Installing requirements...")
-requirements = ["pyrogram", "tgcrypto", "yt-dlp", "requests", "beautifulsoup4", "cloudscraper"]
+requirements = ["pyrogram", "tgcrypto", "yt-dlp", "requests", "beautifulsoup4", "cloudscraper", "tqdm"]
 for req in requirements:
     try:
         subprocess.check_call([sys.executable, "-m", "pip", "install", req, "--quiet"])
@@ -65,6 +67,7 @@ from pyrogram.errors import FloodWait
 import yt_dlp
 from bs4 import BeautifulSoup
 import cloudscraper
+from tqdm import tqdm
 
 app = None
 
@@ -235,60 +238,170 @@ def extract_video_url(url):
     
     return None
 
-def download_video(url, output_path):
-    """Download video"""
-    print(f"📥 Downloading: {url[:100]}...")
-    
-    # Clean URL if it's from VK
-    url = clean_vk_url(url)
+def download_hls_with_progress(m3u8_url, output_path):
+    """Download HLS stream with progress bar"""
+    print("🎬 Downloading HLS stream with progress...")
     
     try:
-        # Check if it's an m3u8 stream
-        if '.m3u8' in url:
-            print("🎬 Detected HLS stream, using ffmpeg...")
-            
-            cmd = [
-                'ffmpeg',
-                '-i', url,
-                '-c', 'copy',
-                '-bsf:a', 'aac_adtstoasc',
-                '-y',
-                output_path
-            ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            if result.returncode == 0 and os.path.exists(output_path):
-                size = os.path.getsize(output_path) / (1024*1024)
-                print(f"✅ Downloaded HLS stream: {size:.1f}MB")
-                return True
-            else:
-                print(f"❌ HLS download failed")
-                return False
+        # First, get the total duration using ffprobe
+        duration_cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            m3u8_url
+        ]
         
-        # For regular downloads, use yt-dlp
+        result = subprocess.run(duration_cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            total_duration = float(result.stdout.strip())
+            print(f"⏱️ Total duration: {total_duration:.0f} seconds")
+        else:
+            total_duration = 0
+        
+        # Download using ffmpeg with progress
+        cmd = [
+            'ffmpeg',
+            '-i', m3u8_url,
+            '-c', 'copy',
+            '-bsf:a', 'aac_adtstoasc',
+            '-y',
+            output_path
+        ]
+        
+        # Create a progress tracking thread
+        progress_info = {'percent': 0, 'finished': False}
+        
+        def track_progress():
+            """Track download progress by monitoring file size"""
+            last_size = 0
+            start_time = time.time()
+            check_interval = 2  # Check every 2 seconds
+            
+            while not progress_info['finished']:
+                if os.path.exists(output_path):
+                    current_size = os.path.getsize(output_path)
+                    
+                    if current_size > 0:
+                        # Estimate progress based on time if we don't know total size
+                        elapsed = time.time() - start_time
+                        
+                        if total_duration > 0:
+                            # Very rough estimate: assume constant bitrate
+                            if current_size > last_size:
+                                # Calculate estimated total size based on bitrate
+                                if elapsed > 10:  # After 10 seconds
+                                    bitrate = current_size / elapsed
+                                    estimated_total = bitrate * total_duration
+                                    if estimated_total > 0:
+                                        percent = (current_size / estimated_total) * 100
+                                        progress_info['percent'] = min(percent, 99)
+                                last_size = current_size
+                        
+                        # Show progress based on file growth
+                        if current_size > last_size:
+                            size_mb = current_size / (1024 * 1024)
+                            print(f"📥 Downloaded: {size_mb:.1f} MB")
+                            last_size = current_size
+                
+                time.sleep(check_interval)
+        
+        # Start progress tracking
+        progress_thread = threading.Thread(target=track_progress)
+        progress_thread.daemon = True
+        progress_thread.start()
+        
+        # Start download
+        start_time = time.time()
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        # Mark as finished
+        progress_info['finished'] = True
+        progress_thread.join(timeout=5)
+        
+        elapsed = time.time() - start_time
+        
+        if result.returncode == 0 and os.path.exists(output_path):
+            final_size = os.path.getsize(output_path) / (1024 * 1024)
+            print(f"✅ Download complete: {final_size:.1f} MB in {elapsed:.1f} seconds")
+            return True
+        else:
+            print(f"❌ HLS download failed")
+            if result.stderr:
+                error_lines = result.stderr.split('\n')[-5:]
+                for line in error_lines:
+                    if line.strip():
+                        print(f"Error: {line}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ HLS download error: {e}")
+        return False
+
+def download_video_with_ytdlp(url, output_path):
+    """Download video using yt-dlp with progress bar"""
+    print("📥 Using yt-dlp with progress...")
+    
+    try:
         ydl_opts = {
             'format': 'worst[height<=240]/worst',
             'outtmpl': output_path,
-            'quiet': True,
+            'quiet': False,  # Show progress
             'no_warnings': True,
             'socket_timeout': 30,
             'user_agent': HEADERS['User-Agent'],
             'http_headers': HEADERS,
+            'progress_hooks': [],
         }
+        
+        # Add progress hook
+        def progress_hook(d):
+            if d['status'] == 'downloading':
+                downloaded = d.get('downloaded_bytes', 0)
+                total = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0)
+                
+                if total > 0:
+                    percent = (downloaded / total) * 100
+                    speed = d.get('speed', 0)
+                    
+                    downloaded_mb = downloaded / (1024 * 1024)
+                    total_mb = total / (1024 * 1024)
+                    speed_mb = speed / (1024 * 1024) if speed else 0
+                    
+                    print(f"📥 {percent:.1f}% - {downloaded_mb:.1f}/{total_mb:.1f} MB - {speed_mb:.1f} MB/s")
+                else:
+                    downloaded_mb = downloaded / (1024 * 1024)
+                    print(f"📥 {downloaded_mb:.1f} MB")
+            elif d['status'] == 'finished':
+                print("✅ Download finished")
+        
+        ydl_opts['progress_hooks'].append(progress_hook)
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
         
         if os.path.exists(output_path):
-            size = os.path.getsize(output_path) / (1024*1024)
-            print(f"✅ Downloaded: {size:.1f}MB")
+            size = os.path.getsize(output_path) / (1024 * 1024)
+            print(f"✅ Download complete: {size:.1f} MB")
             return True
             
     except Exception as e:
-        print(f"❌ Download failed: {e}")
+        print(f"❌ yt-dlp download failed: {e}")
     
     return False
+
+def download_video(url, output_path):
+    """Download video with progress display"""
+    print(f"📥 Downloading: {url[:100]}...")
+    
+    # Clean URL if it's from VK
+    url = clean_vk_url(url)
+    
+    # Choose download method based on URL
+    if '.m3u8' in url:
+        return download_hls_with_progress(url, output_path)
+    else:
+        return download_video_with_ytdlp(url, output_path)
 
 async def upload_to_telegram(file_path, caption):
     """Upload to Telegram channel"""
@@ -299,10 +412,13 @@ async def upload_to_telegram(file_path, caption):
     print(f"📊 File size: {file_size:.1f}MB")
     
     try:
-        # First try with progress
+        # Upload with progress
         def progress(current, total):
             percent = (current / total) * 100
-            print(f"📤 {percent:.0f}%")
+            speed = current / (time.time() - progress.start_time) / 1024 if (time.time() - progress.start_time) > 0 else 0
+            print(f"📤 {percent:.0f}% - {speed:.0f} KB/s")
+        
+        progress.start_time = time.time()
         
         await app.send_video(
             chat_id=TELEGRAM_CHANNEL,
@@ -380,7 +496,7 @@ async def process_movie(video_url, video_title):
         
         print(f"✅ Found URL: {direct_url[:100]}...")
         
-        # Step 2: Download
+        # Step 2: Download with progress
         print("2️⃣ Downloading video...")
         if not download_video(direct_url, output_file):
             return False, "Download failed"
@@ -410,7 +526,8 @@ async def process_movie(video_url, video_title):
 async def main():
     """Main function"""
     print("="*50)
-    print("🎬 Movie Uploader v2.0")
+    print("🎬 Movie Uploader v2.1")
+    print("🎯 With Download Progress Display")
     print("="*50)
     
     # Check ffmpeg
