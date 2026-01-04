@@ -1,33 +1,36 @@
-name: Video Processor
+name: 📺 Series Uploader
 
 on:
   workflow_dispatch:
     inputs:
       series_name:
-        description: 'Series name (English)'
+        description: '📺 اسم المسلسل (إنجليزي)'
         required: true
-        default: 'the-protector'
+        default: 'afili-ask'
       series_name_arabic:
-        description: 'Series name (Arabic)'
+        description: '📺 اسم المسلسل (عربي)'
         required: true
-        default: 'المحافظ'
+        default: 'الحب ورطة'
       season_num:
-        description: 'Season number'
-        required: true
-        default: '2'
-      start_episode:
-        description: 'Start episode'
+        description: '🎬 رقم الموسم'
         required: true
         default: '1'
-      end_episode:
-        description: 'End episode'
+        type: number
+      start_episode:
+        description: '📈 الحلقة الأولى'
         required: true
-        default: '8'
+        default: '13'
+        type: number
+      end_episode:
+        description: '📉 الحلقة الأخيرة'
+        required: true
+        default: '15'
+        type: number
 
 jobs:
-  process-videos:
+  upload-series:
     runs-on: ubuntu-latest
-    timeout-minutes: 180  # 3 ساعات حد أقصى
+    timeout-minutes: 180
     
     steps:
     - name: 📥 Checkout repository
@@ -41,18 +44,17 @@ jobs:
     - name: ⚙️ Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg python3-pip curl jq
+        sudo apt-get install -y ffmpeg python3-pip
     
     - name: 📦 Install Python dependencies
       run: |
         pip install --upgrade pip
         pip install -r requirements.txt
     
-    - name: ⚙️ Create configuration file
+    - name: 📺 إعداد المسلسل
       run: |
-        echo "📝 Creating series_config.json..."
+        echo "📺 إعداد ملف المسلسل..."
         
-        # إنشاء ملف JSON بشكل آمن
         cat > series_config.json << 'EOF'
         {
           "series_name": "${{ github.event.inputs.series_name }}",
@@ -63,46 +65,23 @@ jobs:
         }
         EOF
         
-        echo "✅ Configuration file created:"
+        echo "✅ تم إنشاء series_config.json"
         cat series_config.json
+        
+        EPISODES_COUNT=$((${{ github.event.inputs.end_episode }} - ${{ github.event.inputs.start_episode }} + 1))
+        
+        echo ""
+        echo "📋 معلومات المسلسل:"
+        echo "📺 المسلسل: ${{ github.event.inputs.series_name_arabic }}"
+        echo "🎬 الموسم: ${{ github.event.inputs.season_num }}"
+        echo "📊 عدد الحلقات: $EPISODES_COUNT"
     
-    - name: 🚀 Run video processor
+    - name: 🚀 تشغيل سكريبت المسلسلات
       env:
         API_ID: ${{ secrets.API_ID }}
         API_HASH: ${{ secrets.API_HASH }}
         CHANNEL: ${{ secrets.CHANNEL }}
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
-        echo "🔍 Checking environment variables..."
-        echo "API_ID: $API_ID"
-        echo "API_HASH: ${API_HASH:0:10}..."
-        echo "CHANNEL: $CHANNEL"
-        echo "STRING_SESSION length: ${#STRING_SESSION} characters"
-        
-        echo "🚀 Starting video processor..."
+        echo "📺 بدء رفع المسلسل..."
         python main.py 2>&1 | tee processing.log
-        
-        # حفظ حالة الخروج
-        EXIT_CODE=${PIPESTATUS[0]}
-        echo "EXIT_CODE=$EXIT_CODE" >> $GITHUB_ENV
-        
-    - name: 📤 Upload logs
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: processing-logs
-        path: |
-          processing.log
-          series_config.json
-          downloads_*/
-        retention-days: 7
-    
-    - name: ❌ Handle failure
-      if: failure()
-      run: |
-        echo "❌ Workflow failed!"
-        echo "💡 Troubleshooting steps:"
-        echo "1. Check STRING_SESSION is valid"
-        echo "2. Verify channel permissions"
-        echo "3. Check internet connectivity"
-        echo "4. Look at the logs above for specific errors"
