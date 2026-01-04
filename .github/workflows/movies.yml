@@ -15,7 +15,7 @@ on:
 jobs:
   upload-movie:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     
     steps:
     - name: 📥 Checkout repository
@@ -26,20 +26,20 @@ jobs:
       with:
         python-version: '3.10'
     
-    - name: ⚙️ Install dependencies
+    - name: ⚙️ Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg
+        sudo apt-get install -y ffmpeg python3-pip wget
         
     - name: 📦 Install Python packages
       run: |
         pip install --upgrade pip
-        pip install pyrogram tgcrypto yt-dlp requests
+        pip install pyrogram tgcrypto yt-dlp requests beautifulsoup4 cloudscraper
         
     - name: 🎬 Create config
       run: |
-        echo "Creating video_config.json..."
-        cat > video_config.json << EOF
+        echo "🎬 Creating video_config.json..."
+        cat > video_config.json << 'EOF'
         {
           "videos": [
             {
@@ -49,7 +49,7 @@ jobs:
           ]
         }
         EOF
-        echo "Config created:"
+        echo "✅ Config created:"
         cat video_config.json
     
     - name: 🚀 Run Movie Uploader
@@ -61,14 +61,14 @@ jobs:
       run: |
         echo "🚀 Starting Movie Uploader..."
         echo "📅 $(date)"
-        echo "======================================"
-        python video.py 2>&1
+        echo "=========================================="
+        python -u video.py 2>&1
         
     - name: 📤 Save logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: movie-logs
+        name: movie-logs-${{ github.run_number }}
         path: |
           video_config.json
-        retention-days: 1
+        retention-days: 3
