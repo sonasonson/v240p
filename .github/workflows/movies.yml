@@ -1,4 +1,4 @@
-name: 🎬 Video Uploader
+name: 🎬 Universal Video Uploader
 
 on:
   workflow_dispatch:
@@ -6,11 +6,11 @@ on:
       video_url:
         description: '🔗 رابط صفحة الفيلم'
         required: true
-        default: 'https://vide0.net/e/14skdyhzt904'
+        default: 'https://myvidplay.com/e/14skdyhzt904'
       video_title:
         description: '🎬 اسم الفيلم'
         required: true
-        default: 'x مراتي'
+        default: 'x مراتي - الفيلم الكامل'
 
 jobs:
   upload-video:
@@ -60,8 +60,8 @@ jobs:
         CHANNEL: ${{ secrets.CHANNEL }}
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
-        echo "🚀 Starting Video Uploader..."
-        python universal_video_uploader.py 2>&1 | tee processing.log
+        echo "🚀 Starting Universal Video Uploader..."
+        python video.py 2>&1 | tee processing.log
     
     - name: 📤 Upload logs
       if: always()
@@ -71,5 +71,5 @@ jobs:
         path: |
           processing.log
           video_config.json
-          temp_*/
+          downloads_*/
         retention-days: 3
