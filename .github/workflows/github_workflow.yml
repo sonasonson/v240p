@@ -11,17 +11,17 @@ on:
         options:
           - movie
           - series
-      movie_url:
-        description: 'Movie URL (optional)'
+      custom_url:
+        description: 'Custom movie URL (optional)'
         required: false
-      movie_title:
-        description: 'Movie title (optional)'
+      custom_title:
+        description: 'Custom movie title (optional)'
         required: false
 
 jobs:
-  upload-movie:
+  upload-content:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # ساعتين حد أقصى
+    timeout-minutes: 120
     
     steps:
     - name: 📥 Checkout repository
@@ -42,6 +42,26 @@ jobs:
         pip install --upgrade pip
         pip install -r requirements.txt
     
+    - name: 🎬 Create movie config (if custom URL provided)
+      if: github.event.inputs.script_type == 'movie' && github.event.inputs.custom_url != ''
+      run: |
+        echo "🎬 Creating custom movie config..."
+        
+        # إنشاء ملف التكوين
+        cat > movie_config.json << 'EOF'
+        {
+          "movies": [
+            {
+              "url": "${{ github.event.inputs.custom_url }}",
+              "title": "${{ github.event.inputs.custom_title || 'Movie' }}"
+            }
+          ]
+        }
+        EOF
+        
+        echo "✅ Config created:"
+        cat movie_config.json
+    
     - name: 🎬 Run movie uploader
       if: github.event.inputs.script_type == 'movie'
       env:
@@ -51,26 +71,11 @@ jobs:
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
         echo "🚀 Starting Movie Uploader..."
-        python movie_uploader.py 2>&1 | tee movie_processing.log
+        echo "⚙️ Settings: 240p, CRF 28 (same as series)"
+        echo "📝 Caption: Title only (no year)"
         
-        # If specific movie URL provided, create config
-        if [ -n "${{ github.event.inputs.movie_url }}" ]; then
-          echo "🎬 Creating config for single movie..."
-          cat > movie_config.json << EOF
-          {
-            "movies": [
-              {
-                "url": "${{ github.event.inputs.movie_url }}",
-                "title": "${{ github.event.inputs.movie_title || 'Movie' }}",
-                "year": "$(date +%Y)"
-              }
-            ]
-          }
-          EOF
-          
-          echo "📋 Config created:"
-          cat movie_config.json
-        fi
+        # تشغيل السكريبت
+        python movie_uploader_fixed.py 2>&1 | tee processing.log
     
     - name: 📺 Run series uploader
       if: github.event.inputs.script_type == 'series'
@@ -81,15 +86,15 @@ jobs:
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
         echo "📺 Starting Series Uploader..."
-        python main.py 2>&1 | tee series_processing.log
+        python main.py 2>&1 | tee processing.log
     
     - name: 📤 Upload logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: processing-logs-${{ github.event.inputs.script_type }}
+        name: logs-${{ github.event.inputs.script_type }}-${{ github.run_id }}
         path: |
-          *_processing.log
+          processing.log
           *_config.json
-          *_downloads_*/
+          *downloads*/
         retention-days: 3
