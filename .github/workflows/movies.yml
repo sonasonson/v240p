@@ -1,0 +1,71 @@
+name: 🎬 Movies Uploader
+
+on:
+  workflow_dispatch:
+    inputs:
+      movie_url:
+        description: '🔗 رابط صفحة الفيلم'
+        required: true
+        default: 'https://q.larozavideo.net/play.php?vid=956c7e520'
+      movie_title:
+        description: '🎬 اسم الفيلم'
+        required: true
+        default: 'x مراتي'
+
+jobs:
+  upload-movie:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    
+    steps:
+    - name: 📥 Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    
+    - name: ⚙️ Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg python3-pip
+    
+    - name: 📦 Install Python dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: 🎬 إعداد الفيلم
+      run: |
+        echo "🎬 إعداد ملف الفيلم..."
+        
+        cat > video_config.json << 'EOF'
+        {
+          "videos": [
+            {
+              "url": "${{ github.event.inputs.movie_url }}",
+              "title": "${{ github.event.inputs.movie_title }}"
+            }
+          ]
+        }
+        EOF
+        
+        echo "✅ تم إنشاء video_config.json"
+        cat video_config.json
+        
+        echo ""
+        echo "📋 معلومات الفيلم:"
+        echo "🎬 العنوان: ${{ github.event.inputs.movie_title }}"
+        echo "🔗 الرابط: ${{ github.event.inputs.movie_url }}"
+        echo "⚙️ الجودة: 240p (مثل المسلسلات)"
+    
+    - name: 🚀 تشغيل سكريبت الأفلام
+      env:
+        API_ID: ${{ secrets.API_ID }}
+        API_HASH: ${{ secrets.API_HASH }}
+        CHANNEL: ${{ secrets.CHANNEL }}
+        STRING_SESSION: ${{ secrets.STRING_SESSION }}
+      run: |
+        echo "🎬 بدء رفع الفيلم..."
+        python universal_video_uploader.py 2>&1 | tee processing.log
