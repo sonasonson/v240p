@@ -62,7 +62,7 @@ jobs:
       run: |
         echo "🚀 Starting Universal Video Uploader..."
         echo "📅 $(date)"
-        python main.py 2>&1 | tee processing.log
+        python video.py 2>&1 | tee processing.log
     
     - name: 📤 Upload logs
       if: always()
