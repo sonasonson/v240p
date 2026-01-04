@@ -34,7 +34,7 @@ jobs:
     - name: 📦 Install Python packages
       run: |
         pip install --upgrade pip
-        pip install pyrogram tgcrypto yt-dlp requests beautifulsoup4 cloudscraper
+        pip install pyrogram tgcrypto yt-dlp requests beautifulsoup4 cloudscraper tqdm
         
     - name: 🎬 Create config
       run: |
