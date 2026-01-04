@@ -30,11 +30,11 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y ffmpeg python3-pip
-    
+        
     - name: 📦 Install Python dependencies
       run: |
         pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install pyrogram tgcrypto yt-dlp requests beautifulsoup4 lxml cloudscraper Pillow
     
     - name: 🎬 Create video config
       run: |
@@ -61,7 +61,8 @@ jobs:
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
         echo "🚀 Starting Universal Video Uploader..."
-        python video.py 2>&1 | tee processing.log
+        echo "📅 $(date)"
+        python main.py 2>&1 | tee processing.log
     
     - name: 📤 Upload logs
       if: always()
@@ -71,5 +72,4 @@ jobs:
         path: |
           processing.log
           video_config.json
-          downloads_*/
         retention-days: 3
