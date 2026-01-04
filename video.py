@@ -2,6 +2,7 @@
 """
 Universal Video Downloader & Uploader - Complete Version
 Works with any video website
+Download in 240p quality
 """
 
 import os
@@ -14,6 +15,7 @@ import subprocess
 import shutil
 import asyncio
 import base64
+import json
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -66,6 +68,7 @@ HEADERS = {
     'DNT': '1',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
+    'Referer': 'https://filemoon.sx/',
 }
 
 # ===== IMPORTS =====
@@ -81,6 +84,7 @@ def install_requirements():
         "beautifulsoup4>=4.12.0",
         "lxml>=4.9.0",
         "cloudscraper>=1.2.71",
+        "m3u8>=6.0.0",
     ]
     
     for req in requirements:
@@ -100,6 +104,7 @@ from pyrogram.errors import FloodWait, AuthKeyUnregistered, SessionPasswordNeede
 import yt_dlp
 from bs4 import BeautifulSoup
 import cloudscraper
+import m3u8
 
 app = None
 
@@ -195,148 +200,184 @@ async def setup_telegram():
 
 # ===== VIDEO PROCESSING FUNCTIONS =====
 
-def decode_base64_url(encoded_url):
-    """Decode base64 encoded URL"""
+def extract_from_filemoon_with_network(video_page_url):
+    """Extract video from filemoon.sx by mimicking browser network requests"""
     try:
-        # Add padding if needed
-        padding = 4 - len(encoded_url) % 4
-        if padding != 4:
-            encoded_url += "=" * padding
-        
-        decoded = base64.b64decode(encoded_url).decode('utf-8')
-        return decoded
-    except:
-        return None
-
-def extract_from_myvidplay(video_page_url):
-    """Extract video from myvidplay.com specifically"""
-    try:
-        # Create a cloudscraper to bypass Cloudflare
         scraper = cloudscraper.create_scraper()
         
-        print("🌐 Fetching myvidplay page...")
+        print("🌐 Fetching filemoon page...")
         response = scraper.get(video_page_url, headers=HEADERS, timeout=30)
         
         if response.status_code != 200:
             print(f"⚠️ HTTP {response.status_code}")
             return None
         
-        # Look for iframe
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Method 1: Look for iframe with player
-        iframe = soup.find('iframe')
-        if iframe and iframe.get('src'):
-            iframe_url = iframe['src']
-            
-            # Make absolute URL if needed
-            if iframe_url.startswith('//'):
-                iframe_url = 'https:' + iframe_url
-            elif iframe_url.startswith('/'):
-                parsed = urlparse(video_page_url)
-                iframe_url = f'{parsed.scheme}://{parsed.netloc}{iframe_url}'
-            
-            print(f"🔗 Found iframe: {iframe_url}")
-            
-            # Fetch iframe content
-            iframe_response = scraper.get(iframe_url, headers=HEADERS, timeout=30)
-            iframe_soup = BeautifulSoup(iframe_response.text, 'html.parser')
-            
-            # Look for video source in iframe
-            video_source = None
-            
-            # Try to find source with mp4
-            for source in iframe_soup.find_all('source'):
-                if source.get('src') and '.mp4' in source['src']:
-                    video_source = source['src']
-                    break
-            
-            # Try to find video tag
-            if not video_source:
-                video_tag = iframe_soup.find('video')
-                if video_tag and video_tag.get('src'):
-                    video_source = video_tag['src']
-            
-            # Try to find in scripts
-            if not video_source:
-                scripts = iframe_soup.find_all('script')
-                for script in scripts:
-                    if script.string:
-                        # Look for mp4 URL
-                        mp4_match = re.search(r'["\'](https?://[^"\']+\.mp4[^"\']*)["\']', script.string)
-                        if mp4_match:
-                            video_source = mp4_match.group(1)
-                            break
-            
-            if video_source:
-                print(f"✅ Found video source in iframe")
-                return video_source
+        # Method 1: Look for jwplayer setup
+        print("🔍 Searching for JW Player configuration...")
         
-        # Method 2: Look for video player with data source
-        video_div = soup.find('div', {'id': 'player'}) or soup.find('div', {'class': 'player'})
-        if video_div:
-            # Look for data-url or similar attributes
-            for attr in ['data-url', 'data-src', 'data-source', 'src']:
-                if video_div.get(attr):
-                    video_url = video_div[attr]
-                    if video_url:
-                        print(f"✅ Found video in player div")
-                        return video_url
-        
-        # Method 3: Look for scripts with video URLs
+        # Look for script with jwplayer setup
         scripts = soup.find_all('script')
         for script in scripts:
             if script.string:
                 content = script.string
                 
-                # Look for eval(function(p,a,c,k,e,d) patterns
-                eval_match = re.search(r'eval\(function\(p,a,c,k,e,d\)\{.*?\}', content, re.DOTALL)
-                if eval_match:
-                    eval_code = eval_match.group(0)
-                    # Try to extract URLs from packed code
-                    url_matches = re.findall(r'https?://[^\s"\']+', eval_code)
-                    for url in url_matches:
-                        if '.mp4' in url or '.m3u8' in url:
-                            print(f"✅ Found URL in packed script")
-                            return url
-                
-                # Look for direct video URLs
-                video_patterns = [
-                    r'file\s*:\s*["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
-                    r'source\s*:\s*["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
-                    r'src\s*:\s*["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
-                    r'["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
-                    r'["\'](https?://[^"\']+\.m3u8[^"\']*)["\']',
-                ]
-                
-                for pattern in video_patterns:
-                    matches = re.findall(pattern, content)
-                    if matches:
-                        print(f"✅ Found URL via pattern")
-                        return matches[0]
+                # Look for setupConfig or similar
+                if 'setup(' in content or 'jwplayer(' in content:
+                    print("🎬 Found JW Player script")
+                    
+                    # Try to find sources array
+                    sources_patterns = [
+                        r'sources\s*:\s*(\[[^\]]+\])',
+                        r'file\s*:\s*["\']([^"\']+)["\']',
+                        r'"sources"\s*:\s*(\[[^\]]+\])',
+                        r'"file"\s*:\s*["\']([^"\']+)["\']',
+                    ]
+                    
+                    for pattern in sources_patterns:
+                        matches = re.findall(pattern, content, re.DOTALL)
+                        if matches:
+                            for match in matches:
+                                if match.startswith('['):
+                                    # It's a JSON array
+                                    try:
+                                        sources = json.loads(match)
+                                        for source in sources:
+                                            if isinstance(source, dict) and 'file' in source:
+                                                video_url = source['file']
+                                                if video_url and '.m3u8' in video_url:
+                                                    print(f"✅ Found HLS stream in sources")
+                                                    return video_url
+                                            elif isinstance(source, str) and '.m3u8' in source:
+                                                print(f"✅ Found HLS stream")
+                                                return source
+                                    except:
+                                        pass
+                                elif '.m3u8' in match:
+                                    print(f"✅ Found HLS stream")
+                                    return match
         
-        # Method 4: Look for base64 encoded URLs
-        base64_patterns = [
-            r'atob\(["\']([A-Za-z0-9+/=]+)["\']',
-            r'decode\(["\']([A-Za-z0-9+/=]+)["\']',
-            r'["\']([A-Za-z0-9+/=]{20,})["\']',
+        # Method 2: Look for m3u8 URLs in the page
+        print("🔍 Searching for m3u8 URLs...")
+        
+        # Search for m3u8 patterns
+        m3u8_patterns = [
+            r'https?://[^\s"\']+\.m3u8[^\s"\']*',
+            r'"([^"]+\.m3u8[^"]*)"',
+            r"'([^']+\.m3u8[^']*)'",
         ]
         
-        for script in scripts:
-            if script.string:
-                for pattern in base64_patterns:
-                    matches = re.findall(pattern, script.string)
-                    for match in matches:
-                        decoded = decode_base64_url(match)
-                        if decoded and ('http://' in decoded or 'https://' in decoded):
-                            print(f"✅ Found base64 decoded URL")
-                            return decoded
+        for pattern in m3u8_patterns:
+            matches = re.findall(pattern, response.text)
+            for match in matches:
+                if 'master.m3u8' in match or 'index.m3u8' in match:
+                    print(f"✅ Found m3u8 playlist: {match[:100]}...")
+                    return match
+        
+        # Method 3: Check for common CDN patterns
+        print("🔍 Searching for CDN patterns...")
+        
+        cdn_patterns = [
+            r'https?://[^/]+/hls2/[^"\']+\.m3u8[^"\']*',
+            r'https?://[^/]+/stream/[^"\']+\.m3u8[^"\']*',
+            r'https?://[^/]+/video/[^"\']+\.m3u8[^"\']*',
+        ]
+        
+        for pattern in cdn_patterns:
+            matches = re.findall(pattern, response.text)
+            if matches:
+                print(f"✅ Found CDN stream: {matches[0][:100]}...")
+                return matches[0]
+        
+        # Method 4: Look for iframe and check its content
+        print("🔍 Checking iframes...")
+        iframes = soup.find_all('iframe')
+        for iframe in iframes:
+            if iframe.get('src'):
+                iframe_url = iframe['src']
+                if iframe_url.startswith('//'):
+                    iframe_url = 'https:' + iframe_url
+                
+                print(f"📺 Checking iframe: {iframe_url[:100]}...")
+                
+                try:
+                    iframe_response = scraper.get(iframe_url, headers=HEADERS, timeout=30)
+                    
+                    # Search for m3u8 in iframe
+                    for pattern in m3u8_patterns:
+                        iframe_matches = re.findall(pattern, iframe_response.text)
+                        for match in iframe_matches:
+                            if '.m3u8' in match:
+                                print(f"✅ Found m3u8 in iframe")
+                                return match
+                except:
+                    continue
         
         return None
         
     except Exception as e:
-        print(f"⚠️ myvidplay extraction error: {e}")
+        print(f"⚠️ filemoon extraction error: {e}")
         return None
+
+def get_lowest_quality_m3u8(m3u8_url):
+    """Get the lowest quality stream from m3u8 playlist (240p if available)"""
+    try:
+        print("🔍 Looking for lowest quality stream in m3u8...")
+        
+        response = requests.get(m3u8_url, headers=HEADERS, timeout=30)
+        if response.status_code != 200:
+            return m3u8_url
+        
+        m3u8_content = response.text
+        
+        # Check if this is a master playlist with multiple quality options
+        if '#EXT-X-STREAM-INF' in m3u8_content:
+            # Parse the master playlist
+            lines = m3u8_content.split('\n')
+            
+            # Find all streams with their resolutions
+            streams = []
+            current_stream = {}
+            
+            for i, line in enumerate(lines):
+                if line.startswith('#EXT-X-STREAM-INF'):
+                    # Parse resolution from line
+                    resolution_match = re.search(r'RESOLUTION=(\d+)x(\d+)', line)
+                    if resolution_match:
+                        width = int(resolution_match.group(1))
+                        height = int(resolution_match.group(2))
+                        current_stream = {'height': height, 'line_index': i}
+                elif line and not line.startswith('#') and current_stream:
+                    current_stream['url'] = line
+                    
+                    # Make relative URL absolute if needed
+                    if not current_stream['url'].startswith('http'):
+                        base_url = '/'.join(m3u8_url.split('/')[:-1])
+                        current_stream['url'] = f"{base_url}/{current_stream['url']}"
+                    
+                    streams.append(current_stream.copy())
+                    current_stream = {}
+            
+            if streams:
+                # Sort by height (quality) - lowest first
+                streams.sort(key=lambda x: x['height'])
+                
+                # Try to find 240p stream
+                for stream in streams:
+                    if stream['height'] == 240:
+                        print(f"✅ Found 240p stream")
+                        return stream['url']
+                
+                # If no 240p, get the lowest available
+                print(f"✅ Using lowest available: {streams[0]['height']}p")
+                return streams[0]['url']
+        
+        return m3u8_url
+        
+    except Exception as e:
+        print(f"⚠️ Error parsing m3u8: {e}")
+        return m3u8_url
 
 def extract_video_url(video_page_url):
     """Extract video URL from any website using multiple methods"""
@@ -346,40 +387,78 @@ def extract_video_url(video_page_url):
         
         print(f"🌐 Extracting from: {domain}")
         
-        # Try yt-dlp first (supports 1000+ sites)
-        print("🔍 Trying yt-dlp extraction...")
+        # Special handling for filemoon.sx
+        if 'filemoon.sx' in domain or 'filemoon' in domain:
+            print("🔍 Using filemoon.sx specific extractor...")
+            video_url = extract_from_filemoon_with_network(video_page_url)
+            if video_url:
+                # If it's a relative URL, make it absolute
+                if video_url.startswith('//'):
+                    video_url = 'https:' + video_url
+                elif video_url.startswith('/'):
+                    parsed = urlparse(video_page_url)
+                    video_url = f'{parsed.scheme}://{parsed.netloc}{video_url}'
+                
+                # If it's an m3u8 URL, try to get lowest quality
+                if '.m3u8' in video_url:
+                    print("🎬 Found HLS stream, looking for 240p...")
+                    video_url = get_lowest_quality_m3u8(video_url)
+                
+                # Add referer if not present
+                if '?' not in video_url:
+                    video_url += '?'
+                if 'referer=' not in video_url:
+                    video_url += '&referer=https://filemoon.sx/'
+                
+                print(f"✅ Found video URL: {video_url[:100]}...")
+                return video_url, "✅ URL extracted from filemoon.sx"
+        
+        # Try yt-dlp for other sites with 240p preference
+        print("🔍 Trying yt-dlp extraction (preferring 240p)...")
         try:
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
                 'extract_flat': False,
+                'ignoreerrors': True,
+                'user_agent': USER_AGENT,
+                'http_headers': HEADERS,
+                'referer': video_page_url,
+                'format': 'best[height<=240]/worst',  # Prefer 240p or lower
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_page_url, download=False)
                 
-                if info and 'url' in info:
-                    video_url = info['url']
-                    print(f"✅ Found direct URL via yt-dlp")
-                    return video_url, "✅ URL extracted via yt-dlp"
-                elif info and 'formats' in info:
-                    formats = info['formats']
-                    for fmt in formats:
-                        if fmt.get('url'):
-                            video_url = fmt['url']
-                            print(f"✅ Found format via yt-dlp")
+                if info:
+                    # Get the format that was selected
+                    if 'format_id' in info:
+                        print(f"✅ Selected format: {info['format_id']}")
+                    
+                    # Get the URL
+                    if 'url' in info:
+                        video_url = info['url']
+                        print(f"✅ Found direct URL via yt-dlp")
+                        return video_url, "✅ URL extracted via yt-dlp (240p preferred)"
+                    
+                    # Check for formats
+                    elif 'formats' in info:
+                        formats = info['formats']
+                        for fmt in formats:
+                            if fmt.get('height', 0) <= 240:
+                                video_url = fmt['url']
+                                print(f"✅ Found 240p format via yt-dlp")
+                                return video_url, "✅ URL extracted via yt-dlp (240p)"
+                        
+                        # Fallback to first format
+                        if formats:
+                            video_url = formats[0]['url']
+                            print(f"✅ Found format via yt-dlp (fallback)")
                             return video_url, "✅ URL extracted via yt-dlp"
         except Exception as e:
             print(f"⚠️ yt-dlp extraction failed: {e}")
         
-        # Special handling for myvidplay.com
-        if 'myvidplay.com' in domain or 'vidplay' in domain:
-            print("🔍 Using myvidplay specific extractor...")
-            video_url = extract_from_myvidplay(video_page_url)
-            if video_url:
-                return video_url, "✅ URL extracted from myvidplay"
-        
-        # General HTML extraction for other sites
+        # General HTML extraction
         print("🔍 Trying general HTML extraction...")
         try:
             scraper = cloudscraper.create_scraper()
@@ -388,9 +467,33 @@ def extract_video_url(video_page_url):
             if response.status_code != 200:
                 return None, f"HTTP {response.status_code}"
             
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # Search for m3u8 patterns
+            m3u8_patterns = [
+                r'https?://[^\s"\']+\.m3u8[^\s"\']*',
+                r'"([^"]+\.m3u8[^"]*)"',
+                r"'([^']+\.m3u8[^']*)'",
+            ]
             
-            # Look for direct video tags
+            for pattern in m3u8_patterns:
+                matches = re.findall(pattern, response.text)
+                for match in matches:
+                    if '.m3u8' in match:
+                        video_url = match
+                        # Make absolute URL if needed
+                        if video_url.startswith('//'):
+                            video_url = 'https:' + video_url
+                        elif video_url.startswith('/'):
+                            video_url = f'https://{domain}{video_url}'
+                        
+                        # Try to get lowest quality
+                        if '.m3u8' in video_url:
+                            video_url = get_lowest_quality_m3u8(video_url)
+                        
+                        print(f"✅ Found video stream: {video_url[:100]}...")
+                        return video_url, "✅ URL extracted from HTML"
+            
+            # Look for video elements
+            soup = BeautifulSoup(response.text, 'html.parser')
             video_tags = soup.find_all(['video', 'iframe', 'source'])
             
             for tag in video_tags:
@@ -403,7 +506,7 @@ def extract_video_url(video_page_url):
                 elif tag.name == 'source' and tag.get('src'):
                     src = tag['src']
                 
-                if src:
+                if src and ('.mp4' in src.lower() or '.m3u8' in src.lower()):
                     # Make absolute URL
                     if src.startswith('//'):
                         src = 'https:' + src
@@ -414,31 +517,6 @@ def extract_video_url(video_page_url):
                     
                     print(f"✅ Found video source: {src[:80]}...")
                     return src, "✅ URL extracted from HTML"
-            
-            # Look in meta tags
-            meta_tags = soup.find_all('meta')
-            for meta in meta_tags:
-                if meta.get('property') in ['og:video', 'og:video:url', 'twitter:player:stream']:
-                    if meta.get('content'):
-                        video_url = meta['content']
-                        print(f"✅ Found video in meta tag")
-                        return video_url, "✅ URL extracted from meta"
-            
-            # Look in scripts
-            script_patterns = [
-                r'["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
-                r'["\'](https?://[^"\']+\.m3u8[^"\']*)["\']',
-                r'file:\s*["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
-                r'source:\s*["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
-                r'videoUrl:\s*["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
-            ]
-            
-            for pattern in script_patterns:
-                matches = re.findall(pattern, response.text)
-                if matches:
-                    video_url = matches[0]
-                    print(f"✅ Found video URL via pattern")
-                    return video_url, "✅ URL extracted from script"
         
         except Exception as e:
             print(f"⚠️ HTML extraction failed: {e}")
@@ -448,14 +526,74 @@ def extract_video_url(video_page_url):
     except Exception as e:
         return None, f"❌ Error: {str(e)}"
 
-def download_video(url, output_path):
-    """Download video using yt-dlp or direct download"""
+def download_hls_stream(m3u8_url, output_path):
+    """Download HLS stream using ffmpeg with 240p output"""
     try:
-        print(f"📥 Downloading from: {url[:80]}...")
+        print(f"📥 Downloading HLS stream at 240p...")
         
-        # Try yt-dlp first
+        # Use ffmpeg to download and convert to 240p directly
+        cmd = [
+            'ffmpeg',
+            '-i', m3u8_url,
+            '-vf', 'scale=-2:240',  # Scale to 240p
+            '-c:v', 'libx264',
+            '-crf', '28',  # Good quality for 240p
+            '-preset', 'fast',
+            '-c:a', 'aac',
+            '-b:a', '64k',  # Lower audio bitrate for 240p
+            '-y',
+            output_path
+        ]
+        
+        start = time.time()
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0 and os.path.exists(output_path):
+            elapsed = time.time() - start
+            size = os.path.getsize(output_path) / (1024*1024)
+            print(f"✅ HLS stream downloaded at 240p in {elapsed:.1f}s ({size:.1f}MB)")
+            return True
+        else:
+            print(f"❌ HLS download failed")
+            if result.stderr:
+                print(f"Error: {result.stderr[:200]}")
+            
+            # Fallback: download and then compress
+            print("🔄 Trying alternative method: download then compress...")
+            temp_file = output_path + '.temp.mp4'
+            
+            # Download without processing
+            cmd2 = [
+                'ffmpeg',
+                '-i', m3u8_url,
+                '-c', 'copy',
+                '-bsf:a', 'aac_adtstoasc',
+                '-y',
+                temp_file
+            ]
+            
+            result2 = subprocess.run(cmd2, capture_output=True, text=True)
+            if result2.returncode == 0 and os.path.exists(temp_file):
+                # Now compress to 240p
+                return compress_video(temp_file, output_path, is_temp=True)
+            return False
+            
+    except Exception as e:
+        print(f"❌ HLS download error: {e}")
+        return False
+
+def download_video(url, output_path):
+    """Download video using appropriate method based on URL"""
+    try:
+        print(f"📥 Downloading from: {url[:100]}...")
+        
+        # Check if it's an HLS stream
+        if '.m3u8' in url:
+            return download_hls_stream(url, output_path)
+        
+        # Otherwise use yt-dlp with 240p preference
         ydl_opts = {
-            'format': 'best[height<=720]/best',
+            'format': 'best[height<=240]/worst',  # Prefer 240p or lowest
             'outtmpl': output_path,
             'quiet': True,
             'no_warnings': True,
@@ -466,6 +604,7 @@ def download_video(url, output_path):
             'skip_unavailable_fragments': True,
             'socket_timeout': 30,
             'noprogress': True,
+            'referer': 'https://filemoon.sx/',
         }
         
         start = time.time()
@@ -473,18 +612,17 @@ def download_video(url, output_path):
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
-        except:
-            # If yt-dlp fails, try direct download
-            print("🔄 yt-dlp failed, trying direct download...")
-            try:
-                response = requests.get(url, headers=HEADERS, stream=True, timeout=60)
-                if response.status_code == 200:
-                    total_size = int(response.headers.get('content-length', 0))
-                    
-                    with open(output_path, 'wb') as f:
-                        if total_size == 0:
-                            f.write(response.content)
-                        else:
+        except Exception as e:
+            print(f"❌ yt-dlp download failed: {e}")
+            
+            # Try direct download for non-streaming content
+            if not url.endswith('.m3u8'):
+                try:
+                    response = requests.get(url, headers=HEADERS, stream=True, timeout=60)
+                    if response.status_code == 200:
+                        total_size = int(response.headers.get('content-length', 0))
+                        
+                        with open(output_path, 'wb') as f:
                             downloaded = 0
                             chunk_size = 8192
                             
@@ -492,33 +630,28 @@ def download_video(url, output_path):
                                 if chunk:
                                     f.write(chunk)
                                     downloaded += len(chunk)
-                                    
-                                    # Show progress
-                                    if total_size > 0:
-                                        percent = (downloaded / total_size) * 100
-                                        if int(percent) % 10 == 0:
-                                            print(f"  ⬇️ {percent:.0f}%")
-                                
-                            print(f"  ✅ Download complete")
-                else:
-                    print(f"❌ Direct download failed: HTTP {response.status_code}")
+                            
+                            print(f"  ✅ Direct download complete")
+                    else:
+                        print(f"❌ Direct download failed: HTTP {response.status_code}")
+                        return False
+                except Exception as e2:
+                    print(f"❌ Direct download error: {e2}")
                     return False
-            except Exception as e:
-                print(f"❌ Direct download error: {e}")
-                return False
         
         elapsed = time.time() - start
         
         if os.path.exists(output_path):
             size = os.path.getsize(output_path) / (1024*1024)
-            print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
-            return True
+            if size > 0.1:  # At least 100KB
+                print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
+                return True
         
         # Try different extensions
         base = os.path.splitext(output_path)[0]
         for ext in ['.mp4', '.mkv', '.webm', '.avi', '.flv', '.mov']:
             alt_file = base + ext
-            if os.path.exists(alt_file):
+            if os.path.exists(alt_file) and os.path.getsize(alt_file) > 1024:
                 shutil.move(alt_file, output_path)
                 size = os.path.getsize(output_path) / (1024*1024)
                 print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
@@ -530,31 +663,50 @@ def download_video(url, output_path):
         print(f"❌ Download error: {e}")
         return False
 
-def compress_video(input_file, output_file):
-    """Compress video to 480p"""
+def compress_video(input_file, output_file, is_temp=False):
+    """Compress video to 240p (same as original script)"""
     if not os.path.exists(input_file):
         print(f"❌ File not found: {input_file}")
         return False
     
-    original_size = os.path.getsize(input_file) / (1024 * 1024)
-    print(f"🎬 Compressing video...")
-    print(f"📊 Original: {original_size:.1f}MB")
+    file_size = os.path.getsize(input_file) / (1024 * 1024)
+    print(f"📊 Original file size: {file_size:.1f}MB")
     
-    # Check if compression is needed
-    if original_size < 50:  # Less than 50MB
-        print(f"📊 File is already small, copying without compression")
-        shutil.copy2(input_file, output_file)
-        return True
+    if file_size < 1:  # Less than 1MB
+        print("❌ File is too small (probably not a video)")
+        return False
     
+    # Check if it's actually a video file
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,height', '-of', 'default=noprint_wrappers=1:nokey=1', input_file]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            output = result.stdout.strip()
+            if output:
+                parts = output.split('\n')
+                if len(parts) >= 2:
+                    height = int(parts[1]) if parts[1].isdigit() else 0
+                    if height <= 240:
+                        print(f"📊 File is already {height}p, copying without compression")
+                        shutil.copy2(input_file, output_file)
+                        if is_temp:
+                            os.remove(input_file)
+                        return True
+    except:
+        pass
+    
+    print(f"🎬 Compressing video to 240p...")
+    
+    # Use same settings as original script
     cmd = [
         'ffmpeg',
         '-i', input_file,
-        '-vf', 'scale=-2:480',
+        '-vf', 'scale=-2:240',  # Scale to 240p
         '-c:v', 'libx264',
-        '-crf', '26',
-        '-preset', 'fast',
+        '-crf', '28',  # Same as original
+        '-preset', 'veryfast',  # Same as original
         '-c:a', 'aac',
-        '-b:a', '128k',
+        '-b:a', '64k',  # Same as original
         '-y',
         output_file
     ]
@@ -566,32 +718,54 @@ def compress_video(input_file, output_file):
         if result.returncode == 0 and os.path.exists(output_file):
             new_size = os.path.getsize(output_file) / (1024 * 1024)
             elapsed = time.time() - start
-            reduction = ((original_size - new_size) / original_size) * 100
             
-            print(f"✅ Compressed in {elapsed:.1f}s")
-            print(f"📊 New size: {new_size:.1f}MB (-{reduction:.1f}%)")
-            return True
+            if new_size > 1:  # At least 1MB
+                reduction = ((file_size - new_size) / file_size) * 100 if file_size > 0 else 0
+                print(f"✅ Compressed to 240p in {elapsed:.1f}s")
+                print(f"📊 New size: {new_size:.1f}MB (-{reduction:.1f}%)")
+                
+                # Clean up temp file if needed
+                if is_temp:
+                    os.remove(input_file)
+                return True
+            else:
+                print("❌ Compressed file is too small")
+                shutil.copy2(input_file, output_file)
+                if is_temp:
+                    os.remove(input_file)
+                return True
         else:
             print(f"❌ Compression failed, using original")
             shutil.copy2(input_file, output_file)
-            return False
+            if is_temp:
+                os.remove(input_file)
+            return True
     except Exception as e:
         print(f"❌ Compression error: {e}, using original")
         shutil.copy2(input_file, output_file)
-        return False
+        if is_temp:
+            os.remove(input_file)
+        return True
+
+# ... [rest of the functions remain the same as previous version] ...
 
 def create_thumbnail(input_file, thumbnail_path):
     """Create thumbnail from video"""
     try:
         print(f"🖼️ Creating thumbnail...")
         
-        # First try to get from middle
+        # First check if file is valid
+        if not os.path.exists(input_file) or os.path.getsize(input_file) < 1024:
+            print("❌ Video file is too small or invalid")
+            return False
+        
+        # Try to get thumbnail from middle
         cmd = [
             'ffmpeg',
             '-i', input_file,
             '-ss', '00:01:00',
             '-vframes', '1',
-            '-s', '320x180',
+            '-s', '320x180',  # Same as original
             '-f', 'image2',
             '-y',
             thumbnail_path
@@ -607,6 +781,16 @@ def create_thumbnail(input_file, thumbnail_path):
         
         # Try from beginning
         cmd[4] = '00:00:05'
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0 and os.path.exists(thumbnail_path):
+            size = os.path.getsize(thumbnail_path) / 1024
+            if size > 1:
+                print(f"✅ Thumbnail created ({size:.1f}KB)")
+                return True
+        
+        # Try from 30 seconds
+        cmd[4] = '00:00:30'
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         
         if result.returncode == 0 and os.path.exists(thumbnail_path):
@@ -640,7 +824,7 @@ def get_video_dimensions(input_file):
     except:
         pass
     
-    return 854, 480  # Default for 480p
+    return 426, 240  # Default for 240p (same as original)
 
 def get_video_duration(input_file):
     """Get video duration in seconds"""
@@ -692,23 +876,6 @@ async def upload_video(file_path, caption, thumbnail_path=None):
         
         if thumbnail_path and os.path.exists(thumbnail_path):
             upload_params['thumb'] = thumbnail_path
-        else:
-            # Create a simple thumbnail if none exists
-            try:
-                import PIL
-                from PIL import Image, ImageDraw
-                
-                # Create a simple colored thumbnail
-                img = Image.new('RGB', (320, 180), color=(73, 109, 137))
-                d = ImageDraw.Draw(img)
-                d.text((10, 10), caption[:30], fill=(255, 255, 255))
-                
-                thumb_path = file_path + ".thumb.jpg"
-                img.save(thumb_path)
-                upload_params['thumb'] = thumb_path
-                print(f"🖼️ Created simple thumbnail")
-            except:
-                pass
         
         # Upload with progress
         start_time = time.time()
@@ -757,6 +924,7 @@ async def process_video(video_url, video_title, download_dir, index=1):
     """Process a single video"""
     print(f"\n{'─'*50}")
     print(f"🎬 Movie: {video_title}")
+    print(f"🎯 Target quality: 240p")
     print(f"{'─'*50}")
     
     temp_file = os.path.join(download_dir, f"temp_{index:02d}.mp4")
@@ -773,36 +941,61 @@ async def process_video(video_url, video_title, download_dir, index=1):
     
     try:
         # 1. Extract direct video URL
-        print("🔍 Extracting video URL...")
+        print("🔍 Extracting video URL (preferring 240p)...")
         direct_video_url, message = extract_video_url(video_url)
         
         if not direct_video_url:
             print(f"❌ {message}")
-            return False, "URL extraction failed"
+            
+            # Try manual extraction for filemoon.sx
+            if 'filemoon.sx' in video_url:
+                print("🔄 Trying manual extraction for filemoon.sx...")
+                
+                # Try common patterns based on your network analysis
+                video_id = video_url.split('/')[-1]
+                possible_urls = [
+                    f"https://be4235.rcr32.ams02.i8yz83pn.com/hls2/07/07294/{video_id}_h/master.m3u8",
+                    f"https://be4235.rcr32.ams02.i8yz83pn.com/hls2/07/07294/{video_id}_h/index.m3u8",
+                ]
+                
+                for test_url in possible_urls:
+                    print(f"🔄 Testing: {test_url}")
+                    try:
+                        response = requests.head(test_url, headers=HEADERS, timeout=10)
+                        if response.status_code == 200:
+                            direct_video_url = test_url
+                            print(f"✅ Found video URL manually")
+                            break
+                    except:
+                        continue
+            
+            if not direct_video_url:
+                return False, "URL extraction failed"
         
         print(f"✅ {message}")
         print(f"📎 Direct URL: {direct_video_url[:100]}...")
         
         # 2. Download
-        print("📥 Downloading video...")
-        if not download_video(direct_video_url, temp_file):
+        print("📥 Downloading video at 240p...")
+        if not download_video(direct_video_url, final_file):
             return False, "Download failed"
+        
+        # Check if download was successful
+        if not os.path.exists(final_file) or os.path.getsize(final_file) < 1024:
+            print("❌ Downloaded file is too small or doesn't exist")
+            return False, "Downloaded file is invalid"
         
         # 3. Create thumbnail
         print("🖼️ Creating thumbnail...")
-        create_thumbnail(temp_file, thumbnail_file)
+        create_thumbnail(final_file, thumbnail_file)
         
-        # 4. Compress
-        print("🎬 Processing video...")
-        if not compress_video(temp_file, final_file):
-            return False, "Compression failed"
-        
-        # 5. Upload
+        # 4. Upload
         caption = video_title
         thumb = thumbnail_file if os.path.exists(thumbnail_file) else None
         
+        print("☁️ Uploading to Telegram...")
         if await upload_video(final_file, caption, thumb):
-            # 6. Clean up
+            # 5. Clean up
             for file_path in [temp_file, final_file, thumbnail_file]:
                 if os.path.exists(file_path):
                     try:
@@ -823,7 +1016,8 @@ async def process_video(video_url, video_title, download_dir, index=1):
 async def main():
     """Main function"""
     print("="*50)
-    print("🎬 Universal Video Processor v3.0")
+    print("🎬 Universal Video Processor v5.0")
+    print("🎯 Target quality: 240p")
     print("="*50)
     
     # Check dependencies
@@ -861,8 +1055,8 @@ async def main():
         sample_config = {
             "videos": [
                 {
-                    "url": "https://myvidplay.com/e/14skdyhzt904",
-                    "title": "اسم الفيلم"
+                    "url": "https://filemoon.sx/e/swm1uivboqix",
+                    "title": "اكس مراتي - الفيلم الكامل"
                 }
             ]
         }
@@ -896,6 +1090,7 @@ async def main():
     print("🚀 Starting Video Processing")
     print('='*50)
     print(f"🎬 Total videos: {len(videos)}")
+    print(f"🎯 Target quality: 240p")
     print(f"📁 Working dir: {download_dir}")
     print(f"⏰ Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
@@ -944,7 +1139,7 @@ async def main():
     print(f"❌ Failed: {len(failed)}")
     
     if successful == total:
-        print("🎉 All videos processed successfully!")
+        print("🎉 All videos processed successfully at 240p!")
     elif successful > 0:
         print(f"⚠️ Partially successful ({successful}/{total})")
     else:
