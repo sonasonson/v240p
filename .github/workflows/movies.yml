@@ -1,45 +1,45 @@
-name: 🎬 Universal Video Uploader
+name: 🎬 Movie Uploader
 
 on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: '🔗 رابط صفحة الفيلم'
+        description: '🔗 Video URL'
         required: true
-        default: 'https://myvidplay.com/e/14skdyhzt904'
+        default: 'https://vk.com/video_ext.php?oid=791768803&id=456249035'
       video_title:
-        description: '🎬 اسم الفيلم'
+        description: '🎬 Movie Title'
         required: true
-        default: 'x مراتي - الفيلم الكامل'
+        default: 'اكس مراتي - الفيلم الكامل'
 
 jobs:
-  upload-video:
+  upload-movie:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
     
     steps:
     - name: 📥 Checkout repository
       uses: actions/checkout@v4
     
-    - name: 🐍 Set up Python
+    - name: 🐍 Setup Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
     
-    - name: ⚙️ Install system dependencies
+    - name: ⚙️ Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg python3-pip
+        sudo apt-get install -y ffmpeg
         
-    - name: 📦 Install Python dependencies
+    - name: 📦 Install Python packages
       run: |
         pip install --upgrade pip
-        pip install pyrogram tgcrypto yt-dlp requests beautifulsoup4 lxml cloudscraper Pillow
-    
-    - name: 🎬 Create video config
+        pip install pyrogram tgcrypto yt-dlp requests
+        
+    - name: 🎬 Create config
       run: |
-        echo "🎬 Creating video_config.json..."
-        cat > video_config.json << 'EOF'
+        echo "Creating video_config.json..."
+        cat > video_config.json << EOF
         {
           "videos": [
             {
@@ -49,27 +49,26 @@ jobs:
           ]
         }
         EOF
-        
-        echo "✅ Config created:"
+        echo "Config created:"
         cat video_config.json
     
-    - name: 🚀 Run video uploader
+    - name: 🚀 Run Movie Uploader
       env:
         API_ID: ${{ secrets.API_ID }}
         API_HASH: ${{ secrets.API_HASH }}
         CHANNEL: ${{ secrets.CHANNEL }}
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
-        echo "🚀 Starting Universal Video Uploader..."
+        echo "🚀 Starting Movie Uploader..."
         echo "📅 $(date)"
-        python video.py 2>&1 | tee processing.log
-    
-    - name: 📤 Upload logs
+        echo "======================================"
+        python video.py 2>&1
+        
+    - name: 📤 Save logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: video-logs-${{ github.run_number }}
+        name: movie-logs
         path: |
-          processing.log
           video_config.json
-        retention-days: 3
+        retention-days: 1
