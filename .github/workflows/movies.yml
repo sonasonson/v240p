@@ -1,21 +1,21 @@
-name: 🎬 Movies Uploader
+name: 🎬 Video Uploader
 
 on:
   workflow_dispatch:
     inputs:
-      movie_url:
+      video_url:
         description: '🔗 رابط صفحة الفيلم'
         required: true
-        default: 'https://q.larozavideo.net/play.php?vid=956c7e520'
-      movie_title:
+        default: 'https://vide0.net/e/14skdyhzt904'
+      video_title:
         description: '🎬 اسم الفيلم'
         required: true
         default: 'x مراتي'
 
 jobs:
-  upload-movie:
+  upload-video:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 120
     
     steps:
     - name: 📥 Checkout repository
@@ -36,36 +36,40 @@ jobs:
         pip install --upgrade pip
         pip install -r requirements.txt
     
-    - name: 🎬 إعداد الفيلم
+    - name: 🎬 Create video config
       run: |
-        echo "🎬 إعداد ملف الفيلم..."
-        
+        echo "🎬 Creating video_config.json..."
         cat > video_config.json << 'EOF'
         {
           "videos": [
             {
-              "url": "${{ github.event.inputs.movie_url }}",
-              "title": "${{ github.event.inputs.movie_title }}"
+              "url": "${{ github.event.inputs.video_url }}",
+              "title": "${{ github.event.inputs.video_title }}"
             }
           ]
         }
         EOF
         
-        echo "✅ تم إنشاء video_config.json"
+        echo "✅ Config created:"
         cat video_config.json
-        
-        echo ""
-        echo "📋 معلومات الفيلم:"
-        echo "🎬 العنوان: ${{ github.event.inputs.movie_title }}"
-        echo "🔗 الرابط: ${{ github.event.inputs.movie_url }}"
-        echo "⚙️ الجودة: 240p (مثل المسلسلات)"
     
-    - name: 🚀 تشغيل سكريبت الأفلام
+    - name: 🚀 Run video uploader
       env:
         API_ID: ${{ secrets.API_ID }}
         API_HASH: ${{ secrets.API_HASH }}
         CHANNEL: ${{ secrets.CHANNEL }}
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
-        echo "🎬 بدء رفع الفيلم..."
+        echo "🚀 Starting Video Uploader..."
         python universal_video_uploader.py 2>&1 | tee processing.log
+    
+    - name: 📤 Upload logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: video-logs-${{ github.run_number }}
+        path: |
+          processing.log
+          video_config.json
+          temp_*/
+        retention-days: 3
