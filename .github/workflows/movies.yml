@@ -15,7 +15,7 @@ on:
 jobs:
   upload-movie:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60  # زيادة المهلة للفيديوهات الطويلة
     
     steps:
     - name: 📥 Checkout repository
@@ -29,12 +29,12 @@ jobs:
     - name: ⚙️ Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg python3-pip wget
+        sudo apt-get install -y ffmpeg python3-pip
         
     - name: 📦 Install Python packages
       run: |
         pip install --upgrade pip
-        pip install pyrogram tgcrypto yt-dlp requests beautifulsoup4 cloudscraper tqdm
+        pip install pyrogram tgcrypto yt-dlp requests beautifulsoup4 cloudscraper
         
     - name: 🎬 Create config
       run: |
@@ -61,6 +61,8 @@ jobs:
       run: |
         echo "🚀 Starting Movie Uploader..."
         echo "📅 $(date)"
+        echo "=========================================="
+        echo "🎯 Strategy: Download Low Quality → Compress to 240p"
         echo "=========================================="
         python -u video.py 2>&1
         
