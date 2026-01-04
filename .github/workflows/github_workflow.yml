@@ -75,7 +75,7 @@ jobs:
         echo "📝 Caption: Title only (no year)"
         
         # تشغيل السكريبت
-        python movie_uploader_fixed.py 2>&1 | tee processing.log
+        python movie_uploader.py 2>&1 | tee processing.log
     
     - name: 📺 Run series uploader
       if: github.event.inputs.script_type == 'series'
