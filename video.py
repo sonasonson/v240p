@@ -3,6 +3,7 @@
 Universal Video Uploader - For Movies
 Download lowest quality then compress to 240p
 Fixed URL issues with yt-dlp download
+Enhanced upload settings
 """
 
 import os
@@ -92,13 +93,25 @@ async def setup_telegram():
             api_id=TELEGRAM_API_ID,
             api_hash=TELEGRAM_API_HASH,
             session_string=STRING_SESSION.strip(),
-            in_memory=True
+            in_memory=True,
+            device_model="GitHub Actions",
+            app_version="2.0.0",
+            system_version="Ubuntu 22.04"
         )
         
         await app.start()
         me = await app.get_me()
-        print(f"✅ Connected as: {me.first_name}")
-        return True
+        print(f"✅ Connected as: {me.first_name} (@{me.username if me.username else 'N/A'})")
+        
+        # Verify channel access
+        try:
+            chat = await app.get_chat(TELEGRAM_CHANNEL)
+            print(f"📢 Channel found: {chat.title}")
+            return True
+        except Exception as e:
+            print(f"❌ Cannot access channel: {e}")
+            return False
+            
     except Exception as e:
         print(f"❌ Telegram setup failed: {e}")
         return False
@@ -350,19 +363,6 @@ def extract_video_url(url):
     
     return None
 
-def test_url_access(url):
-    """Test if URL is accessible"""
-    print("🔗 Testing URL accessibility...")
-    
-    try:
-        headers = HEADERS.copy()
-        response = requests.head(url, headers=headers, timeout=10)
-        print(f"📡 HTTP Status: {response.status_code}")
-        return response.status_code == 200
-    except Exception as e:
-        print(f"⚠️ URL test failed: {e}")
-        return False
-
 def download_with_ytdlp(url, output_path):
     """Download video using yt-dlp"""
     print("📥 Downloading with yt-dlp...")
@@ -505,8 +505,78 @@ def compress_to_240p(input_path, output_path):
         shutil.copy2(input_path, output_path)
         return True
 
-async def upload_to_telegram(file_path, caption):
-    """Upload to Telegram channel"""
+def create_thumbnail(input_file, thumbnail_path):
+    """Create thumbnail from video"""
+    try:
+        print(f"🖼️ Creating thumbnail...")
+        
+        cmd = [
+            'ffmpeg',
+            '-i', input_file,
+            '-ss', '00:00:05',
+            '-vframes', '1',
+            '-s', '320x180',
+            '-f', 'image2',
+            '-y',
+            thumbnail_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0 and os.path.exists(thumbnail_path):
+            size = os.path.getsize(thumbnail_path) / 1024
+            print(f"✅ Thumbnail created ({size:.1f}KB)")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"❌ Thumbnail error: {e}")
+        return False
+
+def get_video_dimensions(input_file):
+    """Get video dimensions"""
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'quiet',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height',
+            '-of', 'csv=p=0',
+            input_file
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            dimensions = result.stdout.strip().split(',')
+            if len(dimensions) == 2:
+                return int(dimensions[0]), int(dimensions[1])
+    except:
+        pass
+    
+    return 426, 240  # Default for 240p
+
+def get_video_duration(input_file):
+    """Get video duration in seconds"""
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            input_file
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return int(float(result.stdout.strip()))
+    except:
+        pass
+    
+    return 0
+
+async def upload_to_telegram(file_path, caption, thumbnail_path=None):
+    """Upload to Telegram channel with enhanced settings"""
     print(f"☁️ Uploading: {os.path.basename(file_path)}")
     
     # Get file size
@@ -514,6 +584,32 @@ async def upload_to_telegram(file_path, caption):
     print(f"📊 File size: {file_size:.1f} MB")
     
     try:
+        # Get video dimensions
+        width, height = get_video_dimensions(file_path)
+        
+        # Get duration
+        duration = get_video_duration(file_path)
+        
+        # Prepare upload parameters
+        upload_params = {
+            'chat_id': TELEGRAM_CHANNEL,
+            'video': file_path,
+            'caption': caption,
+            'supports_streaming': True,
+            'width': width,
+            'height': height,
+            'duration': duration,
+        }
+        
+        # Add thumbnail if available
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            upload_params['thumb'] = thumbnail_path
+            print(f"🖼️ Using thumbnail: {os.path.basename(thumbnail_path)}")
+        
+        print(f"📐 Video dimensions: {width}x{height}")
+        print(f"⏱️ Duration: {duration} seconds")
+        print(f"🎬 Streaming: Enabled (pauses on exit)")
+        
         # Upload with progress
         start_time = time.time()
         last_percent = 0
@@ -526,13 +622,9 @@ async def upload_to_telegram(file_path, caption):
                 print(f"📤 {percent:.0f}% - {speed:.0f} KB/s")
                 last_percent = percent
         
-        await app.send_video(
-            chat_id=TELEGRAM_CHANNEL,
-            video=file_path,
-            caption=caption,
-            supports_streaming=True,
-            progress=progress
-        )
+        upload_params['progress'] = progress
+        
+        await app.send_video(**upload_params)
         
         elapsed = time.time() - start_time
         print(f"✅ Uploaded in {elapsed:.1f} seconds")
@@ -541,17 +633,14 @@ async def upload_to_telegram(file_path, caption):
     except FloodWait as e:
         print(f"⏳ Flood wait: {e.value} seconds")
         await asyncio.sleep(e.value)
-        return await upload_to_telegram(file_path, caption)
+        return await upload_to_telegram(file_path, caption, thumbnail_path)
     except Exception as e:
         print(f"❌ Upload failed: {e}")
         # Try without progress
         try:
-            await app.send_video(
-                chat_id=TELEGRAM_CHANNEL,
-                video=file_path,
-                caption=caption,
-                supports_streaming=True
-            )
+            if 'progress' in upload_params:
+                upload_params.pop('progress')
+            await app.send_video(**upload_params)
             print("✅ Upload successful (without progress)")
             return True
         except Exception as e2:
@@ -574,6 +663,7 @@ async def process_movie(video_url, video_title):
     # Define file paths
     temp_file = os.path.join(temp_dir, "temp_video.mp4")
     final_file = os.path.join(temp_dir, "movie_240p.mp4")
+    thumbnail_file = os.path.join(temp_dir, "thumbnail.jpg")
     
     try:
         # Step 1: Extract URL
@@ -625,9 +715,15 @@ async def process_movie(video_url, video_title):
             print("⚠️ Final file issue, using temp file")
             final_file = temp_file
         
-        # Step 4: Upload
-        print("4️⃣ Uploading to Telegram...")
-        if not await upload_to_telegram(final_file, video_title):
+        # Step 4: Create thumbnail
+        print("4️⃣ Creating thumbnail...")
+        thumbnail_created = create_thumbnail(final_file, thumbnail_file)
+        
+        # Step 5: Upload
+        print("5️⃣ Uploading to Telegram...")
+        thumb = thumbnail_file if thumbnail_created and os.path.exists(thumbnail_file) else None
+        
+        if not await upload_to_telegram(final_file, video_title, thumb):
             return False, "Upload failed"
         
         # Cleanup
@@ -650,9 +746,9 @@ async def process_movie(video_url, video_title):
 async def main():
     """Main function"""
     print("="*50)
-    print("🎬 Movie Uploader v3.2")
+    print("🎬 Movie Uploader v3.3")
     print("🎯 Strategy: Download Low Quality → Compress to 240p")
-    print("🔧 Fixed URL issues with yt-dlp download")
+    print("🔧 Enhanced upload settings")
     print("="*50)
     
     # Check ffmpeg
