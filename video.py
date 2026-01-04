@@ -2,6 +2,7 @@
 """
 Universal Video Uploader - For Movies
 Download lowest quality then compress to 240p
+Fixed URL issues
 """
 
 import os
@@ -15,7 +16,7 @@ import shutil
 import asyncio
 import threading
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin, quote
 
 # ===== CONFIGURATION =====
 TELEGRAM_API_ID = os.environ.get("API_ID", "")
@@ -103,11 +104,11 @@ async def setup_telegram():
         return False
 
 def clean_vk_url(url):
-    """Clean VK URL from escape characters"""
+    """Clean VK URL from escape characters and fix common issues"""
     if not url:
         return url
     
-    # Remove backslashes
+    # Remove backslashes first
     url = url.replace('\\/', '/').replace('\\\\', '\\')
     url = url.replace('\\"', '"').replace("\\'", "'")
     
@@ -117,16 +118,97 @@ def clean_vk_url(url):
     elif url.startswith('http:\\/\\/'):
         url = url.replace('http:\\/\\/', 'http://')
     
+    # Remove double slashes after domain (except after https://)
+    url = re.sub(r'(https?://[^/]+)//+', r'\1/', url)
+    
+    # Remove trailing dot if present
+    if url.endswith('.'):
+        url = url[:-1]
+    
+    # Fix common VK URL patterns
+    if 'vkuser.net' in url:
+        # Fix URLs with double slashes in path
+        url = re.sub(r'//+', '/', url)
+        # Ensure proper URL structure
+        if not url.endswith('.m3u8') and not url.endswith('.mp4'):
+            # Try to find the actual video file
+            url = url.rstrip('/')
+    
     return url.strip()
+
+def fix_vk_m3u8_url(url):
+    """Fix VK m3u8 URLs that have formatting issues"""
+    print("🔧 Fixing VK m3u8 URL...")
+    
+    # If it's already a clean m3u8 URL, return it
+    if 'video.m3u8' in url and '?' in url:
+        return url
+    
+    # Try to extract the actual m3u8 URL from parameters
+    if 'expires=' in url:
+        # This looks like a VK video URL with parameters
+        # Extract base URL and parameters
+        base_match = re.search(r'(https?://[^/]+)/', url)
+        if base_match:
+            base_url = base_match.group(1)
+            
+            # Extract common VK parameters
+            params = {}
+            param_patterns = [
+                r'expires/(\d+)',
+                r'srcIp/([^/]+)',
+                r'pr/(\d+)',
+                r'srcAg/([^/]+)',
+                r'ch/([^/]+)',
+                r'ms/([^/]+)',
+                r'mid/(\d+)',
+                r'type/(\d+)',
+                r'sig/([^/]+)',
+                r'ct/(\d+)',
+                r'urls/([^/]+)',
+                r'clientType/(\d+)',
+                r'zs/(\d+)',
+                r'id/(\d+)',
+            ]
+            
+            for pattern in param_patterns:
+                match = re.search(pattern, url)
+                if match:
+                    param_name = pattern.split('/')[0]
+                    param_value = match.group(1)
+                    params[param_name] = param_value
+            
+            # Construct proper query string
+            if params:
+                query_params = []
+                for key, value in params.items():
+                    query_params.append(f"{key}={value}")
+                
+                query_string = '&'.join(query_params)
+                fixed_url = f"{base_url}/video.m3u8?{query_string}"
+                print(f"✅ Fixed URL: {fixed_url[:100]}...")
+                return fixed_url
+    
+    return url
 
 def get_lowest_quality_m3u8(m3u8_url):
     """Get the lowest quality stream from m3u8 playlist"""
     print("🔍 Looking for lowest quality in m3u8...")
     
     try:
+        # Fix URL first
+        m3u8_url = clean_vk_url(m3u8_url)
+        m3u8_url = fix_vk_m3u8_url(m3u8_url)
+        
+        # Add referer header for VK
+        headers = HEADERS.copy()
+        headers['Referer'] = 'https://vk.com/'
+        
         # Fetch the m3u8 playlist
-        response = requests.get(m3u8_url, headers=HEADERS, timeout=30)
+        print(f"📥 Fetching playlist from: {m3u8_url[:100]}...")
+        response = requests.get(m3u8_url, headers=headers, timeout=30)
         if response.status_code != 200:
+            print(f"⚠️ Failed to fetch playlist: HTTP {response.status_code}")
             return m3u8_url
         
         m3u8_content = response.text
@@ -150,7 +232,8 @@ def get_lowest_quality_m3u8(m3u8_url):
                         current_stream = {
                             'height': height,
                             'width': width,
-                            'bandwidth': 0
+                            'bandwidth': 0,
+                            'url': None
                         }
                         
                         # Extract bandwidth if available
@@ -159,7 +242,7 @@ def get_lowest_quality_m3u8(m3u8_url):
                             current_stream['bandwidth'] = int(bw_match.group(1))
                 
                 elif line and not line.startswith('#') and current_stream:
-                    current_stream['url'] = line
+                    current_stream['url'] = line.strip()
                     
                     # Make URL absolute if relative
                     if not current_stream['url'].startswith('http'):
@@ -175,17 +258,19 @@ def get_lowest_quality_m3u8(m3u8_url):
                 
                 print(f"📊 Available qualities:")
                 for stream in streams:
-                    print(f"  • {stream['height']}p (Bandwidth: {stream['bandwidth']/1000:.0f}kbps)")
+                    quality = f"{stream['height']}p"
+                    bandwidth_kbps = stream['bandwidth'] / 1000 if stream['bandwidth'] > 0 else 'N/A'
+                    print(f"  • {quality} (Bandwidth: {bandwidth_kbps}kbps)")
                 
-                # Get the lowest quality (preferably <= 360p)
-                lowest_stream = streams[0]
+                # Get the lowest quality (preferably <= 240p)
+                selected_stream = streams[0]
                 for stream in streams:
-                    if stream['height'] <= 360:
-                        lowest_stream = stream
+                    if stream['height'] <= 240:
+                        selected_stream = stream
                         break
                 
-                print(f"✅ Selected: {lowest_stream['height']}p")
-                return lowest_stream['url']
+                print(f"✅ Selected: {selected_stream['height']}p")
+                return selected_stream['url']
         
         return m3u8_url
         
@@ -227,11 +312,38 @@ def extract_vk_video_url(video_page_url):
                     if isinstance(match, str) and ('http' in match or '.mp4' in match or '.m3u8' in match):
                         url = clean_vk_url(match)
                         if url and '.m3u8' in url:
+                            print(f"🔧 Found m3u8 URL, processing...")
                             # Try to get lowest quality from m3u8
                             url = get_lowest_quality_m3u8(url)
                         if url:
                             print(f"✅ Found URL with pattern: {pattern[:30]}...")
                             return url
+        
+        # Method 2: Try to extract from iframe
+        print("🔍 Searching for iframe...")
+        soup = BeautifulSoup(response.text, 'html.parser')
+        iframe = soup.find('iframe')
+        
+        if iframe and iframe.get('src'):
+            iframe_url = iframe['src']
+            if iframe_url.startswith('//'):
+                iframe_url = 'https:' + iframe_url
+            
+            print(f"📺 Found iframe, checking content...")
+            try:
+                iframe_response = scraper.get(iframe_url, headers=HEADERS, timeout=30)
+                
+                # Search in iframe
+                for pattern in patterns:
+                    matches = re.findall(pattern, iframe_response.text)
+                    for match in matches:
+                        if isinstance(match, str) and ('http' in match or '.mp4' in match or '.m3u8' in match):
+                            url = clean_vk_url(match)
+                            if url:
+                                print(f"✅ Found URL in iframe")
+                                return url
+            except Exception as e:
+                print(f"⚠️ Iframe error: {e}")
         
         return None
         
@@ -268,35 +380,44 @@ def extract_video_url(url):
     
     return None
 
-def download_with_ffmpeg_progress(url, output_path, is_hls=True):
-    """Download using ffmpeg with progress display"""
-    print("🎬 Starting download...")
+def test_url_access(url):
+    """Test if URL is accessible"""
+    print("🔗 Testing URL accessibility...")
     
     try:
-        # Prepare ffmpeg command
-        if is_hls:
-            cmd = [
-                'ffmpeg',
-                '-i', url,
-                '-c', 'copy',  # Copy without re-encoding for speed
-                '-bsf:a', 'aac_adtstoasc',
-                '-y',
-                output_path
-            ]
-        else:
-            cmd = [
-                'ffmpeg',
-                '-i', url,
-                '-c', 'copy',  # Copy without re-encoding
-                '-y',
-                output_path
-            ]
+        headers = HEADERS.copy()
+        response = requests.head(url, headers=headers, timeout=10)
+        print(f"📡 HTTP Status: {response.status_code}")
+        return response.status_code == 200
+    except Exception as e:
+        print(f"⚠️ URL test failed: {e}")
+        return False
+
+def download_with_ffmpeg(url, output_path):
+    """Download using ffmpeg"""
+    print("🎬 Starting download with ffmpeg...")
+    
+    try:
+        # Test URL first
+        if not test_url_access(url):
+            print("❌ URL is not accessible")
+            return False
         
-        # Create progress tracking
+        # Prepare ffmpeg command
+        cmd = [
+            'ffmpeg',
+            '-i', url,
+            '-c', 'copy',  # Copy without re-encoding for speed
+            '-bsf:a', 'aac_adtstoasc',
+            '-y',
+            output_path
+        ]
+        
+        print(f"🔄 Running command: ffmpeg -i [URL] -c copy {output_path}")
+        
+        # Track progress
         progress_info = {
             'downloaded': 0,
-            'total': 0,
-            'percent': 0,
             'finished': False,
             'last_update': time.time()
         }
@@ -306,14 +427,14 @@ def download_with_ffmpeg_progress(url, output_path, is_hls=True):
             while not progress_info['finished']:
                 if os.path.exists(output_path):
                     current_size = os.path.getsize(output_path)
-                    progress_info['downloaded'] = current_size
-                    
-                    # Update display every 3 seconds
                     current_time = time.time()
-                    if current_time - progress_info['last_update'] >= 3:
+                    
+                    # Update every 5 seconds
+                    if current_time - progress_info['last_update'] >= 5:
                         size_mb = current_size / (1024 * 1024)
                         print(f"📥 Downloaded: {size_mb:.1f} MB")
                         progress_info['last_update'] = current_time
+                        progress_info['downloaded'] = current_size
                 
                 time.sleep(1)
         
@@ -322,9 +443,9 @@ def download_with_ffmpeg_progress(url, output_path, is_hls=True):
         progress_thread.daemon = True
         progress_thread.start()
         
-        # Start download
+        # Start download with timeout
         start_time = time.time()
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)  # 30 minutes timeout
         
         # Mark as finished
         progress_info['finished'] = True
@@ -338,22 +459,73 @@ def download_with_ffmpeg_progress(url, output_path, is_hls=True):
             
             # Check if file is valid
             if final_size < 1:  # Less than 1MB
-                print("⚠️ File seems too small, checking...")
+                print("⚠️ File seems too small")
                 return False
             
             return True
         else:
-            print(f"❌ Download failed")
+            print(f"❌ Download failed with code: {result.returncode}")
             if result.stderr:
-                # Show last error lines
-                error_lines = result.stderr.split('\n')[-10:]
-                for line in error_lines:
-                    if line.strip():
-                        print(f"Error: {line}")
-            return False
+                # Show relevant error lines
+                error_lines = [line for line in result.stderr.split('\n') if 'Error' in line or 'error' in line]
+                if error_lines:
+                    print("📝 Error details:")
+                    for line in error_lines[-5:]:  # Last 5 error lines
+                        print(f"  {line}")
             
+            # Try alternative method if ffmpeg fails
+            print("🔄 Trying alternative download method...")
+            return download_alternative(url, output_path)
+            
+    except subprocess.TimeoutExpired:
+        print("⏰ Download timed out after 30 minutes")
+        return False
     except Exception as e:
         print(f"❌ Download error: {e}")
+        return False
+
+def download_alternative(url, output_path):
+    """Alternative download method using requests"""
+    print("🔄 Using alternative download method...")
+    
+    try:
+        headers = HEADERS.copy()
+        response = requests.get(url, headers=headers, stream=True, timeout=30)
+        
+        if response.status_code != 200:
+            print(f"❌ HTTP {response.status_code}")
+            return False
+        
+        total_size = int(response.headers.get('content-length', 0))
+        
+        print(f"📥 Downloading {total_size / (1024*1024):.1f} MB...")
+        
+        with open(output_path, 'wb') as f:
+            downloaded = 0
+            start_time = time.time()
+            chunk_size = 8192
+            
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    
+                    # Update progress every 5MB
+                    if downloaded % (5 * 1024 * 1024) < chunk_size:
+                        elapsed = time.time() - start_time
+                        speed = downloaded / elapsed / 1024 if elapsed > 0 else 0
+                        
+                        downloaded_mb = downloaded / (1024 * 1024)
+                        print(f"📥 {downloaded_mb:.1f} MB - {speed:.0f} KB/s")
+        
+        elapsed = time.time() - start_time
+        final_size = os.path.getsize(output_path) / (1024 * 1024)
+        print(f"✅ Alternative download complete: {final_size:.1f} MB in {elapsed:.1f}s")
+        
+        return final_size > 1
+        
+    except Exception as e:
+        print(f"❌ Alternative download failed: {e}")
         return False
 
 def compress_to_240p(input_path, output_path):
@@ -395,31 +567,9 @@ def compress_to_240p(input_path, output_path):
         output_path
     ]
     
-    # Track compression progress
-    progress_info = {'finished': False, 'last_update': time.time()}
-    
-    def track_compression():
-        while not progress_info['finished']:
-            if os.path.exists(output_path):
-                current_time = time.time()
-                if current_time - progress_info['last_update'] >= 5:
-                    if os.path.exists(output_path):
-                        size = os.path.getsize(output_path) / (1024 * 1024)
-                        print(f"🎬 Compressing... Current size: {size:.1f} MB")
-                        progress_info['last_update'] = current_time
-            time.sleep(1)
-    
-    # Start progress thread
-    progress_thread = threading.Thread(target=track_compression)
-    progress_thread.daemon = True
-    progress_thread.start()
-    
-    # Start compression
+    print("🔄 Starting compression...")
     start_time = time.time()
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
-    progress_info['finished'] = True
-    progress_thread.join(timeout=5)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)  # 1 hour timeout
     
     elapsed = time.time() - start_time
     
@@ -438,6 +588,8 @@ def compress_to_240p(input_path, output_path):
         return True
     else:
         print("❌ Compression failed, using original file")
+        if result.stderr:
+            print(f"Error: {result.stderr[:200]}")
         shutil.copy2(input_path, output_path)
         return True
 
@@ -523,8 +675,7 @@ async def process_movie(video_url, video_title):
         
         # Step 2: Download (low quality)
         print("2️⃣ Downloading (lowest quality available)...")
-        is_hls = '.m3u8' in direct_url
-        if not download_with_ffmpeg_progress(direct_url, temp_file, is_hls):
+        if not download_with_ffmpeg(direct_url, temp_file):
             return False, "Download failed"
         
         # Check downloaded file
@@ -566,8 +717,9 @@ async def process_movie(video_url, video_title):
 async def main():
     """Main function"""
     print("="*50)
-    print("🎬 Movie Uploader v3.0")
+    print("🎬 Movie Uploader v3.1")
     print("🎯 Strategy: Download Low Quality → Compress to 240p")
+    print("🔧 Fixed URL issues")
     print("="*50)
     
     # Check ffmpeg
