@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Universal Video Uploader - For Movies
-Download lowest quality then compress to 240p
+Download 240p minimum quality then compress to 240p
 Fixed URL issues with yt-dlp download
 Enhanced upload settings
 """
@@ -167,9 +167,9 @@ def fix_cdn_url(url):
     
     return url
 
-def get_lowest_quality_m3u8(m3u8_url):
-    """Get the lowest quality stream from m3u8 playlist"""
-    print("🔍 Looking for lowest quality in m3u8...")
+def get_minimum_240p_m3u8(m3u8_url):
+    """Get minimum 240p stream from m3u8 playlist (ignore 144p)"""
+    print("🔍 Looking for minimum 240p quality in m3u8...")
     
     try:
         # Fix URL first
@@ -238,12 +238,28 @@ def get_lowest_quality_m3u8(m3u8_url):
                     bandwidth_kbps = stream['bandwidth'] / 1000 if stream['bandwidth'] > 0 else 'N/A'
                     print(f"  • {quality} (Bandwidth: {bandwidth_kbps}kbps)")
                 
-                # Get the lowest quality (preferably <= 240p)
-                selected_stream = streams[0]
+                # Strategy: Find minimum 240p or higher, ignore 144p
+                selected_stream = None
+                
+                # First, try to find 240p exactly
                 for stream in streams:
-                    if stream['height'] <= 240:
+                    if stream['height'] == 240:
                         selected_stream = stream
+                        print(f"✅ Found exact 240p quality")
                         break
+                
+                # If no 240p, find the next higher quality (ignoring 144p)
+                if not selected_stream:
+                    for stream in streams:
+                        if stream['height'] > 144:  # Ignore 144p
+                            selected_stream = stream
+                            print(f"⚠️ No 240p found, selecting {stream['height']}p (ignoring 144p)")
+                            break
+                
+                # If still no stream found (only 144p available), take 144p
+                if not selected_stream:
+                    selected_stream = streams[0]  # This will be 144p
+                    print(f"⚠️ Only 144p available, selecting it as last resort")
                 
                 print(f"✅ Selected: {selected_stream['height']}p")
                 return selected_stream['url']
@@ -291,10 +307,10 @@ def extract_vk_video_url(video_page_url):
                     
                     if url and '.m3u8' in url:
                         print(f"🔧 Found m3u8 URL: {url[:80]}...")
-                        # Try to get lowest quality from m3u8
-                        lowest_url = get_lowest_quality_m3u8(url)
-                        if lowest_url:
-                            return lowest_url
+                        # Try to get minimum 240p quality from m3u8
+                        video_url = get_minimum_240p_m3u8(url)
+                        if video_url:
+                            return video_url
         
         # Try to extract from iframe
         print("🔍 Searching for iframe...")
@@ -318,10 +334,10 @@ def extract_vk_video_url(video_page_url):
                             url = clean_vk_url(match)
                             url = fix_cdn_url(url)
                             if url and '.m3u8' in url:
-                                lowest_url = get_lowest_quality_m3u8(url)
-                                if lowest_url:
+                                video_url = get_minimum_240p_m3u8(url)
+                                if video_url:
                                     print(f"✅ Found URL in iframe")
-                                    return lowest_url
+                                    return video_url
             except Exception as e:
                 print(f"⚠️ Iframe error: {e}")
         
@@ -335,7 +351,7 @@ def extract_vk_video_url(video_page_url):
         return None
 
 def extract_video_url(url):
-    """Extract direct video URL"""
+    """Extract direct video URL with minimum 240p quality"""
     print(f"🔍 Extracting from: {url}")
     
     # Check if it's VK
@@ -343,12 +359,12 @@ def extract_video_url(url):
     if 'vk.com' in parsed_url.netloc or 'vkontakte' in parsed_url.netloc:
         return extract_vk_video_url(url)
     
-    # For other sites, try yt-dlp with lowest quality
+    # For other sites, try yt-dlp with minimum 240p quality
     try:
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'format': 'worst[height<=360]/worst',  # Lowest quality <= 360p
+            'format': 'worst[height>=240][height<=360]/worst[height>=240]/worst',
             'socket_timeout': 30,
         }
         
@@ -356,7 +372,11 @@ def extract_video_url(url):
             info = ydl.extract_info(url, download=False)
             if info and 'url' in info:
                 video_url = info['url']
-                print(f"✅ Found lowest quality URL via yt-dlp")
+                # Check if we got the right quality
+                if 'height' in info and info['height']:
+                    print(f"✅ Found {info['height']}p URL via yt-dlp")
+                else:
+                    print(f"✅ Found URL via yt-dlp (quality unknown)")
                 return video_url
     except Exception as e:
         print(f"⚠️ yt-dlp failed: {e}")
@@ -364,13 +384,13 @@ def extract_video_url(url):
     return None
 
 def download_with_ytdlp(url, output_path):
-    """Download video using yt-dlp"""
-    print("📥 Downloading with yt-dlp...")
+    """Download video using yt-dlp with minimum 240p quality"""
+    print("📥 Downloading with yt-dlp (minimum 240p)...")
     
     try:
         ydl_opts = {
             'outtmpl': output_path,
-            'format': 'worst[height<=240]/worst',  # Lowest quality <= 240p
+            'format': 'worst[height>=240][height<=360]/worst[height>=240]/worst',
             'quiet': False,
             'no_warnings': False,
             'socket_timeout': 30,
@@ -383,6 +403,10 @@ def download_with_ytdlp(url, output_path):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             print(f"🔗 Downloading from: {url[:100]}...")
             info = ydl.extract_info(url, download=True)
+            
+            # Log the quality we downloaded
+            if info and 'height' in info and info['height']:
+                print(f"📊 Downloaded {info['height']}p quality")
             
         if os.path.exists(output_path):
             file_size = os.path.getsize(output_path) / (1024 * 1024)
@@ -648,10 +672,11 @@ async def upload_to_telegram(file_path, caption, thumbnail_path=None):
             return False
 
 async def process_movie(video_url, video_title):
-    """Process a single movie - download low quality then compress"""
+    """Process a single movie - download minimum 240p then compress"""
     print(f"\n{'─'*50}")
     print(f"🎬 Processing: {video_title}")
-    print(f"🎯 Strategy: Download low quality → Compress to 240p")
+    print(f"🎯 Strategy: Download minimum 240p → Compress to 240p")
+    print(f"⚠️  Note: Will ignore 144p if 240p or higher is available")
     print(f"🔗 URL: {video_url}")
     print(f"{'─'*50}")
     
@@ -667,7 +692,7 @@ async def process_movie(video_url, video_title):
     
     try:
         # Step 1: Extract URL
-        print("1️⃣ Extracting video URL...")
+        print("1️⃣ Extracting video URL (minimum 240p)...")
         direct_url = extract_video_url(video_url)
         
         if not direct_url:
@@ -676,8 +701,8 @@ async def process_movie(video_url, video_title):
         
         print(f"✅ Found URL: {direct_url[:100]}...")
         
-        # Step 2: Download using yt-dlp
-        print("2️⃣ Downloading (using yt-dlp)...")
+        # Step 2: Download using yt-dlp (minimum 240p)
+        print("2️⃣ Downloading (minimum 240p quality)...")
         if not download_with_ytdlp(direct_url, temp_file):
             # Try alternative method
             print("🔄 Trying alternative download method...")
@@ -688,25 +713,35 @@ async def process_movie(video_url, video_title):
         if not os.path.exists(temp_file) or os.path.getsize(temp_file) < 1024:
             return False, "Downloaded file is invalid"
         
-        # Step 3: Compress to 240p if needed
-        print("3️⃣ Checking if compression needed...")
+        # Step 3: Check quality and compress to 240p if needed
+        print("3️⃣ Checking video quality...")
         
-        # Check video height
         try:
             cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', 
                    '-show_entries', 'stream=height', '-of', 'csv=p=0:nk=1', temp_file]
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
                 height = result.stdout.strip()
-                if height.isdigit() and int(height) <= 240:
-                    print(f"📊 Video is already {height}p, no compression needed")
-                    final_file = temp_file
+                if height.isdigit():
+                    print(f"📊 Downloaded video is {height}p")
+                    
+                    if int(height) <= 240:
+                        print(f"✅ Video is already {height}p or lower, no compression needed")
+                        final_file = temp_file
+                    else:
+                        print("🎬 Compressing to 240p...")
+                        if not compress_to_240p(temp_file, final_file):
+                            return False, "Compression failed"
                 else:
-                    print("🎬 Compressing to 240p...")
+                    print("⚠️ Could not determine video height, trying compression...")
                     if not compress_to_240p(temp_file, final_file):
                         return False, "Compression failed"
+            else:
+                print("⚠️ Could not check video height, trying compression...")
+                if not compress_to_240p(temp_file, final_file):
+                    return False, "Compression failed"
         except:
-            print("⚠️ Could not check video height, trying compression...")
+            print("⚠️ Error checking video quality, trying compression...")
             if not compress_to_240p(temp_file, final_file):
                 return False, "Compression failed"
         
@@ -746,8 +781,9 @@ async def process_movie(video_url, video_title):
 async def main():
     """Main function"""
     print("="*50)
-    print("🎬 Movie Uploader v3.3")
-    print("🎯 Strategy: Download Low Quality → Compress to 240p")
+    print("🎬 Movie Uploader v3.4")
+    print("🎯 Strategy: Download Minimum 240p → Compress to 240p")
+    print("⚠️  Ignores 144p when 240p or higher is available")
     print("🔧 Enhanced upload settings")
     print("="*50)
     
