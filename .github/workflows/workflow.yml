@@ -1,27 +1,56 @@
-name: Content Uploader
+name: 🎬 Video Uploader
 
 on:
   workflow_dispatch:
     inputs:
       content_type:
-        description: 'Content type'
+        description: '🎬 نوع المحتوى'
         required: true
         default: 'movie'
         type: choice
         options:
           - movie
           - series
+      
+      # إعدادات الأفلام
       movie_url:
-        description: 'Movie URL (optional)'
+        description: '🔗 رابط صفحة الفيلم'
         required: false
+        default: 'https://q.larozavideo.net/play.php?vid=956c7e520'
       movie_title:
-        description: 'Movie title (optional)'
+        description: '🎬 اسم الفيلم'
         required: false
+        default: 'x مراتي'
+      
+      # إعدادات المسلسلات
+      series_name:
+        description: '📺 اسم المسلسل (إنجليزي)'
+        required: false
+        default: 'afili-ask'
+      series_name_arabic:
+        description: '📺 اسم المسلسل (عربي)'
+        required: false
+        default: 'الحب ورطة'
+      season_num:
+        description: '🎬 رقم الموسم'
+        required: false
+        default: '1'
+        type: number
+      start_episode:
+        description: '📈 الحلقة الأولى'
+        required: false
+        default: '13'
+        type: number
+      end_episode:
+        description: '📉 الحلقة الأخيرة'
+        required: false
+        default: '15'
+        type: number
 
 jobs:
   upload-content:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     
     steps:
     - name: 📥 Checkout repository
@@ -42,48 +71,102 @@ jobs:
         pip install --upgrade pip
         pip install -r requirements.txt
     
-    - name: 🎬 Create movie config if custom URL provided
-      if: github.event.inputs.content_type == 'movie' && github.event.inputs.movie_url != ''
+    - name: 🎬 إعداد الأفلام
+      if: inputs.content_type == 'movie'
       run: |
-        echo "🎬 Creating custom movie config..."
-        cat > movie_config.json << 'CONFIG_EOF'
+        echo "🎬 إعداد ملف الأفلام..."
+        
+        # إنشاء ملف video_config.json
+        cat > video_config.json << 'MOVIE_CONFIG_EOF'
         {
-          "movies": [
+          "videos": [
             {
               "url": "${{ github.event.inputs.movie_url }}",
-              "title": "${{ github.event.inputs.movie_title || 'Movie' }}"
+              "title": "${{ github.event.inputs.movie_title }}"
             }
           ]
         }
-        CONFIG_EOF
+        MOVIE_CONFIG_EOF
         
-        echo "✅ Config created:"
-        cat movie_config.json
+        echo "✅ تم إنشاء video_config.json:"
+        cat video_config.json
+        
+        # عرض معلومات الفيلم
+        echo ""
+        echo "📋 معلومات الفيلم:"
+        echo "🎬 العنوان: ${{ github.event.inputs.movie_title }}"
+        echo "🔗 الرابط: ${{ github.event.inputs.movie_url }}"
+        echo "⚙️ الجودة: 240p (مثل المسلسلات)"
+        echo "📝 التسمية: العنوان فقط بدون سنة"
     
-    - name: 🎬 Run movie uploader
-      if: github.event.inputs.content_type == 'movie'
+    - name: 📺 إعداد المسلسلات
+      if: inputs.content_type == 'series'
+      run: |
+        echo "📺 إعداد ملف المسلسلات..."
+        
+        # إنشاء ملف series_config.json
+        cat > series_config.json << 'SERIES_CONFIG_EOF'
+        {
+          "series_name": "${{ github.event.inputs.series_name }}",
+          "series_name_arabic": "${{ github.event.inputs.series_name_arabic }}",
+          "season_num": ${{ github.event.inputs.season_num }},
+          "start_episode": ${{ github.event.inputs.start_episode }},
+          "end_episode": ${{ github.event.inputs.end_episode }}
+        }
+        SERIES_CONFIG_EOF
+        
+        echo "✅ تم إنشاء series_config.json:"
+        cat series_config.json
+        
+        # حساب عدد الحلقات
+        EPISODES_COUNT=$((${{ github.event.inputs.end_episode }} - ${{ github.event.inputs.start_episode }} + 1))
+        
+        echo ""
+        echo "📋 معلومات المسلسل:"
+        echo "📺 المسلسل: ${{ github.event.inputs.series_name_arabic }}"
+        echo "🌐 الاسم الإنجليزي: ${{ github.event.inputs.series_name }}"
+        echo "🎬 الموسم: ${{ github.event.inputs.season_num }}"
+        echo "📈 الحلقات: من ${{ github.event.inputs.start_episode }} إلى ${{ github.event.inputs.end_episode }}"
+        echo "📊 العدد الإجمالي: $EPISODES_COUNT حلقة"
+        echo "⚙️ الجودة: 240p"
+    
+    - name: 🚀 تشغيل سكريبت الأفلام
+      if: inputs.content_type == 'movie'
       env:
         API_ID: ${{ secrets.API_ID }}
         API_HASH: ${{ secrets.API_HASH }}
         CHANNEL: ${{ secrets.CHANNEL }}
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
-        echo "🚀 Starting Movie Uploader..."
-        echo "⚙️ Using improved extraction method..."
+        echo "🎬 بدء رفع الفيلم..."
+        echo "⏰ الوقت: $(date)"
+        echo "🔧 الإعدادات: 240p, CRF 28 (مثل المسلسلات)"
+        
+        # تشغيل سكريبت الأفلام العالمي
         python universal_video_uploader.py 2>&1 | tee processing.log
+        
+        # حفظ كود الخروج
+        echo "EXIT_CODE=$?" >> $GITHUB_ENV
     
-    - name: 📺 Run series uploader
-      if: github.event.inputs.content_type == 'series'
+    - name: 🚀 تشغيل سكريبت المسلسلات
+      if: inputs.content_type == 'series'
       env:
         API_ID: ${{ secrets.API_ID }}
         API_HASH: ${{ secrets.API_HASH }}
         CHANNEL: ${{ secrets.CHANNEL }}
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
-        echo "📺 Starting Series Uploader..."
+        echo "📺 بدء رفع المسلسل..."
+        echo "⏰ الوقت: $(date)"
+        echo "🔧 الإعدادات: 240p, CRF 28"
+        
+        # تشغيل سكريبت المسلسلات
         python main.py 2>&1 | tee processing.log
+        
+        # حفظ كود الخروج
+        echo "EXIT_CODE=$?" >> $GITHUB_ENV
     
-    - name: 📤 Upload logs
+    - name: 📤 رفع السجلات
       if: always()
       uses: actions/upload-artifact@v4
       with:
@@ -91,5 +174,39 @@ jobs:
         path: |
           processing.log
           *_config.json
-          *downloads*/
-        retention-days: 3
+          *_downloads*/
+          movies_*/
+          videos_*/
+        retention-days: 7
+    
+    - name: ✅ عرض النتائج
+      if: always()
+      run: |
+        echo ""
+        echo "========================================"
+        echo "🏁 نتائج المعالجة"
+        echo "========================================"
+        
+        if [ "${{ job.status }}" = "success" ]; then
+          echo "✅ العملية تمت بنجاح!"
+          
+          if [ -f "processing.log" ]; then
+            echo ""
+            echo "📊 ملخص من السجلات:"
+            grep -E "(✅|❌|Successful:|Failed:)" processing.log | tail -20
+          fi
+        else
+          echo "❌ حدث خطأ في العملية"
+          
+          if [ -f "processing.log" ]; then
+            echo ""
+            echo "🔍 آخر 20 سطر من السجلات:"
+            tail -20 processing.log
+          fi
+        fi
+        
+        echo ""
+        echo "💡 ملاحظات:"
+        echo "- السجلات كاملة متاحة في قسم Artifacts"
+        echo "- للمساعدة: افحص السجلات لمزيد من التفاصيل"
+        echo "- تذكر: الملفات المحلية تم حذفها بعد الرفع"
