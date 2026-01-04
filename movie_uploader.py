@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Telegram Movie Uploader for GitHub
+Telegram Movie Uploader - Same Settings as Series
 """
 
 import os
@@ -13,6 +13,7 @@ import subprocess
 import shutil
 import asyncio
 from datetime import datetime
+from urllib.parse import urlparse
 
 # ===== CONFIGURATION =====
 # Get from GitHub Secrets
@@ -60,7 +61,8 @@ HEADERS = {
     'Accept-Encoding': 'gzip, deflate',
     'DNT': '1',
     'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1'
+    'Upgrade-Insecure-Requests': '1',
+    'Referer': 'https://larooza.cfd/'  # إضافة Referer للموقع
 }
 
 # ===== IMPORTS =====
@@ -145,25 +147,100 @@ async def setup_telegram():
 
 # ===== VIDEO PROCESSING FUNCTIONS =====
 
-def download_movie(video_url, output_path):
-    """Download movie from any URL"""
+def extract_direct_video_url(page_url):
+    """Extract direct video URL from streaming pages"""
     try:
+        print(f"🔍 Extracting video from: {page_url}")
+        
+        # Parse the URL to get domain
+        parsed_url = urlparse(page_url)
+        domain = parsed_url.netloc
+        
+        # Update referer based on domain
+        headers = HEADERS.copy()
+        headers['Referer'] = f"https://{domain}/"
+        
+        # Fetch the page
+        response = requests.get(page_url, headers=headers, timeout=30)
+        
+        if response.status_code != 200:
+            return None, f"HTTP Error {response.status_code}"
+        
+        content = response.text
+        
+        # Look for common video sources
+        patterns = [
+            r'src=["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'file["\']?\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'video["\']?\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'source["\']?\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'player\.load\({src: ["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'jwplayer\("([^"]+)"\)\.setup\({.*?file: ["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'hlsManifestUrl["\']?\s*:\s*["\']([^"\']+)["\']',
+            r'm3u8["\']?\s*:\s*["\']([^"\']+)["\']',
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, content, re.DOTALL | re.IGNORECASE)
+            if matches:
+                for match in matches:
+                    if isinstance(match, tuple):
+                        video_url = match[1] if len(match) > 1 else match[0]
+                    else:
+                        video_url = match
+                    
+                    # Make URL absolute
+                    if video_url.startswith('//'):
+                        video_url = 'https:' + video_url
+                    elif video_url.startswith('/'):
+                        video_url = f"https://{domain}" + video_url
+                    elif not video_url.startswith('http'):
+                        video_url = f"https://{domain}/{video_url}"
+                    
+                    print(f"✅ Found video URL: {video_url[:80]}...")
+                    return video_url, "Direct URL extracted"
+        
+        # If no direct URL found, return the original URL for yt-dlp to handle
+        print("⚠️ No direct URL found, using original URL")
+        return page_url, "Using original URL"
+        
+    except Exception as e:
+        print(f"❌ Extraction error: {e}")
+        return None, str(e)
+
+def download_movie(video_url, output_path):
+    """Download movie with improved error handling"""
+    try:
+        # First try to extract direct URL
+        direct_url, message = extract_direct_video_url(video_url)
+        if direct_url:
+            video_url = direct_url
+            print(f"✅ {message}")
+        
+        # Configure yt-dlp for better compatibility
         ydl_opts = {
             'format': 'best[height<=720]/best',
             'outtmpl': output_path,
             'quiet': False,
             'no_warnings': False,
             'user_agent': USER_AGENT,
-            'retries': 10,
-            'fragment_retries': 10,
+            'referer': video_url,  # Use video URL as referer
+            'http_headers': HEADERS,
+            'retries': 20,
+            'fragment_retries': 20,
             'skip_unavailable_fragments': True,
-            'socket_timeout': 30,
+            'socket_timeout': 60,
             'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'web']
+                'generic': {
+                    'headers': HEADERS
                 }
             },
-            'http_headers': HEADERS,
+            'concurrent_fragment_downloads': 4,
+            'continuedl': True,
+            'noprogress': False,
+            'geo_bypass': True,
+            'geo_bypass_country': 'US',
+            'cookiefile': 'cookies.txt' if os.path.exists('cookies.txt') else None,
         }
         
         print(f"📥 Downloading movie...")
@@ -172,48 +249,107 @@ def download_movie(video_url, output_path):
         start = time.time()
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Get info first
-            info = ydl.extract_info(video_url, download=False)
-            print(f"📝 Title: {info.get('title', 'Unknown')}")
-            print(f"⏱️ Duration: {info.get('duration', 0)} seconds")
-            
-            # Download
+            # Try to get info first
+            try:
+                info = ydl.extract_info(video_url, download=False)
+                if info:
+                    title = info.get('title', 'Unknown')
+                    duration = info.get('duration', 0)
+                    print(f"📝 Title: {title}")
+                    if duration > 0:
+                        print(f"⏱️ Duration: {duration // 60}:{duration % 60:02d} minutes")
+                    
+                    # Download
+                    print("⬇️ Starting download...")
+                    ydl.download([video_url])
+                    actual_title = title
+                else:
+                    ydl.download([video_url])
+                    actual_title = "Unknown"
+            except:
+                # If info extraction fails, try direct download
+                print("⚠️ Info extraction failed, trying direct download...")
+                ydl.download([video_url])
+                actual_title = "Unknown"
+        
+        elapsed = time.time() - start
+        
+        # Check if file exists
+        if os.path.exists(output_path):
+            size = os.path.getsize(output_path) / (1024*1024)
+            print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
+            return True, actual_title
+        
+        # Try different extensions
+        base = os.path.splitext(output_path)[0]
+        for ext in ['.mp4', '.mkv', '.webm', '.avi', '.flv', '.mov', '.m4v', '.3gp']:
+            alt_file = base + ext
+            if os.path.exists(alt_file):
+                shutil.move(alt_file, output_path)
+                size = os.path.getsize(output_path) / (1024*1024)
+                print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
+                return True, actual_title
+        
+        return False, None
+        
+    except Exception as e:
+        print(f"❌ Download error: {e}")
+        
+        # Try alternative method with different settings
+        print("🔄 Trying alternative download method...")
+        return download_movie_alternative(video_url, output_path)
+
+def download_movie_alternative(video_url, output_path):
+    """Alternative download method"""
+    try:
+        # Simpler settings for problematic sites
+        ydl_opts = {
+            'format': 'best',
+            'outtmpl': output_path,
+            'quiet': True,
+            'no_warnings': True,
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'referer': 'https://www.google.com/',
+            'retries': 30,
+            'fragment_retries': 30,
+            'skip_unavailable_fragments': True,
+            'socket_timeout': 120,
+            'extract_flat': False,
+            'ignoreerrors': True,
+            'no_check_certificate': True,
+        }
+        
+        print("🔄 Using alternative downloader...")
+        start = time.time()
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
         
         elapsed = time.time() - start
         
         if os.path.exists(output_path):
             size = os.path.getsize(output_path) / (1024*1024)
-            print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
-            return True, info.get('title', 'Unknown')
-        
-        # Try different extensions
-        base = os.path.splitext(output_path)[0]
-        for ext in ['.mp4', '.mkv', '.webm', '.avi', '.flv', '.mov']:
-            alt_file = base + ext
-            if os.path.exists(alt_file):
-                shutil.move(alt_file, output_path)
-                size = os.path.getsize(output_path) / (1024*1024)
-                print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
-                return True, info.get('title', 'Unknown')
+            print(f"✅ Alternative download successful in {elapsed:.1f}s ({size:.1f}MB)")
+            return True, "Movie"
         
         return False, None
         
     except Exception as e:
-        print(f"❌ Download error: {e}")
+        print(f"❌ Alternative download also failed: {e}")
         return False, None
 
-def compress_video(input_file, output_file):
-    """Compress video to 720p (for movies)"""
+def compress_video_to_240p(input_file, output_file, crf=28):
+    """Compress video to 240p - Same as series"""
     if not os.path.exists(input_file):
         print(f"❌ File not found: {input_file}")
         return False
     
     original_size = os.path.getsize(input_file) / (1024 * 1024)
-    print(f"🎬 Compressing movie...")
+    print(f"🎬 Compressing to 240p...")
     print(f"📊 Original: {original_size:.1f}MB")
+    print(f"⚙️ CRF: {crf} (same as series)")
     
-    # Get duration for progress
+    # Get video duration
     try:
         cmd = ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', 
                '-of', 'default=noprint_wrappers=1:nokey=1', input_file]
@@ -224,16 +360,16 @@ def compress_video(input_file, output_file):
     except:
         duration = 0
     
-    # Compression settings for movies (higher quality than episodes)
+    # Same compression settings as series
     cmd = [
         'ffmpeg',
         '-i', input_file,
-        '-vf', 'scale=-2:720',  # 720p for movies
+        '-vf', 'scale=-2:240',  # 240p مثل المسلسلات
         '-c:v', 'libx264',
-        '-crf', '23',  # Better quality for movies
-        '-preset', 'medium',
+        '-crf', str(crf),  # نفس جودة المسلسلات
+        '-preset', 'veryfast',  # نفس سرعة المسلسلات
         '-c:a', 'aac',
-        '-b:a', '128k',  # Better audio for movies
+        '-b:a', '64k',  # نفس جودة صوت المسلسلات
         '-y',
         output_file
     ]
@@ -250,13 +386,12 @@ def compress_video(input_file, output_file):
             bufsize=1
         )
         
-        # Simple progress indicator
+        # Simple progress
         for line in process.stdout:
             if 'time=' in line:
                 time_match = re.search(r'time=(\d+:\d+:\d+\.\d+)', line)
-                if time_match and duration > 0:
-                    current_time = time_match.group(1)
-                    print(f"⏳ Processing: {current_time}", end='\r')
+                if time_match:
+                    print(f"⏳ Processing: {time_match.group(1)}", end='\r')
         
         process.wait()
         
@@ -267,42 +402,26 @@ def compress_video(input_file, output_file):
             
             print(f"\n✅ Compressed in {elapsed:.1f}s")
             print(f"📊 New size: {new_size:.1f}MB (-{reduction:.1f}%)")
+            print(f"🎬 Quality: 240p (same as series)")
             return True
         else:
-            print(f"❌ Compression failed (code: {process.returncode})")
+            print(f"\n❌ Compression failed")
             return False
     except Exception as e:
-        print(f"❌ Compression error: {e}")
+        print(f"\n❌ Compression error: {e}")
         return False
 
-def create_movie_thumbnail(input_file, thumbnail_path):
-    """Create thumbnail from movie"""
+def create_thumbnail(input_file, thumbnail_path):
+    """Create thumbnail - Same as series"""
     try:
-        print(f"🖼️ Creating movie thumbnail...")
-        
-        # Get duration to take thumbnail from 10%
-        try:
-            cmd = ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', 
-                   '-of', 'default=noprint_wrappers=1:nokey=1', input_file]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            duration = float(result.stdout.strip()) if result.returncode == 0 else 0
-            if duration > 0:
-                thumbnail_time = duration * 0.1  # 10% into movie
-                hours = int(thumbnail_time // 3600)
-                minutes = int((thumbnail_time % 3600) // 60)
-                seconds = int(thumbnail_time % 60)
-                time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-            else:
-                time_str = "00:05:00"
-        except:
-            time_str = "00:05:00"
+        print(f"🖼️ Creating thumbnail...")
         
         cmd = [
             'ffmpeg',
             '-i', input_file,
-            '-ss', time_str,
+            '-ss', '00:00:10',  # نفس توقيت المسلسلات
             '-vframes', '1',
-            '-s', '640x360',  # Larger thumbnail for movies
+            '-s', '320x180',  # نفس حجم المسلسلات
             '-f', 'image2',
             '-y',
             thumbnail_path
@@ -341,7 +460,7 @@ def get_video_dimensions(input_file):
     except:
         pass
     
-    return 1280, 720  # Default for 720p
+    return 426, 240  # Default for 240p
 
 def get_video_duration(input_file):
     """Get video duration in seconds"""
@@ -362,8 +481,8 @@ def get_video_duration(input_file):
     
     return 0
 
-async def upload_movie(file_path, caption, thumbnail_path=None):
-    """Upload movie to Telegram channel"""
+async def upload_video(file_path, caption, thumbnail_path=None):
+    """Upload video to Telegram channel"""
     try:
         if not app or not os.path.exists(file_path):
             return False
@@ -371,7 +490,7 @@ async def upload_movie(file_path, caption, thumbnail_path=None):
         filename = os.path.basename(file_path)
         file_size = os.path.getsize(file_path) / (1024*1024)
         
-        print(f"☁️ Uploading movie: {filename}")
+        print(f"☁️ Uploading: {filename}")
         print(f"📊 Size: {file_size:.1f}MB")
         
         # Get video dimensions
@@ -379,14 +498,6 @@ async def upload_movie(file_path, caption, thumbnail_path=None):
         
         # Get duration
         duration = get_video_duration(file_path)
-        
-        # Format duration
-        if duration > 0:
-            hours = duration // 3600
-            minutes = (duration % 3600) // 60
-            seconds = duration % 60
-            duration_str = f"{hours}:{minutes:02d}:{seconds:02d}" if hours > 0 else f"{minutes}:{seconds:02d}"
-            print(f"⏱️ Movie duration: {duration_str}")
         
         # Prepare upload
         upload_params = {
@@ -409,9 +520,9 @@ async def upload_movie(file_path, caption, thumbnail_path=None):
         def progress(current, total):
             nonlocal last_percent
             percent = (current / total) * 100
-            if percent - last_percent >= 2 or percent == 100:
+            if percent - last_percent >= 5 or percent == 100:
                 speed = current / (time.time() - start_time) / 1024 if (time.time() - start_time) > 0 else 0
-                print(f"📤 Upload: {percent:.1f}% - {speed:.0f}KB/s", end='\r')
+                print(f"📤 {percent:.1f}% - {speed:.0f}KB/s", end='\r')
                 last_percent = percent
         
         upload_params['progress'] = progress
@@ -421,13 +532,13 @@ async def upload_movie(file_path, caption, thumbnail_path=None):
             await app.send_video(**upload_params)
             elapsed = time.time() - start_time
             print(f"\n✅ Uploaded in {elapsed:.1f}s")
-            print(f"🎬 Streaming: Enabled (pauses on exit)")
+            print(f"🎬 Streaming: Enabled")
             return True
             
         except FloodWait as e:
             print(f"\n⏳ Flood wait: {e.value}s")
             await asyncio.sleep(e.value)
-            return await upload_movie(file_path, caption, thumbnail_path)
+            return await upload_video(file_path, caption, thumbnail_path)
             
         except Exception as e:
             print(f"\n❌ Upload error: {e}")
@@ -445,16 +556,16 @@ async def upload_movie(file_path, caption, thumbnail_path=None):
         print(f"❌ Upload failed: {e}")
         return False
 
-async def process_movie(movie_url, movie_title, movie_year, download_dir):
+async def process_movie(movie_url, movie_title, download_dir):
     """Process a single movie"""
     print(f"\n{'─'*50}")
-    print(f"🎬 Processing Movie")
+    print(f"🎬 Movie: {movie_title}")
     print(f"{'─'*50}")
     
     # Create safe filename
-    safe_title = re.sub(r'[^\w\-_\. ]', '_', movie_title)
+    safe_title = re.sub(r'[^\w\-_\. ]', '_', movie_title)[:50]
     temp_file = os.path.join(download_dir, f"temp_{safe_title}.mp4")
-    final_file = os.path.join(download_dir, f"final_{safe_title}.mp4")
+    final_file = os.path.join(download_dir, f"{safe_title}.mp4")
     thumbnail_file = os.path.join(download_dir, f"thumb_{safe_title}.jpg")
     
     # Clean old files
@@ -474,29 +585,24 @@ async def process_movie(movie_url, movie_title, movie_year, download_dir):
             return False, "Download failed"
         
         # Use actual title if available
-        if actual_title and actual_title != 'Unknown':
+        if actual_title and actual_title != 'Unknown' and actual_title != 'Movie':
             movie_title = actual_title
         
         # 2. Create thumbnail
         print("🖼️ Creating thumbnail...")
-        create_movie_thumbnail(temp_file, thumbnail_file)
+        create_thumbnail(temp_file, thumbnail_file)
         
-        # 3. Compress (optional)
-        print("🎬 Compressing movie...")
-        compress_video(temp_file, final_file)
-        
-        # If compression failed, use original
-        if not os.path.exists(final_file):
+        # 3. Compress to 240p (same as series)
+        print("🎬 Compressing to 240p...")
+        if not compress_video_to_240p(temp_file, final_file, crf=28):
+            print("⚠️ Compression failed, using original")
             shutil.copy2(temp_file, final_file)
         
         # 4. Upload
-        caption = f"🎬 {movie_title}"
-        if movie_year:
-            caption += f" ({movie_year})"
-        
+        caption = f"🎬 {movie_title}"  # بدون سنة
         thumb = thumbnail_file if os.path.exists(thumbnail_file) else None
         
-        if await upload_movie(final_file, caption, thumb):
+        if await upload_video(final_file, caption, thumb):
             # 5. Clean up
             for file_path in [temp_file, final_file, thumbnail_file]:
                 if os.path.exists(file_path):
@@ -518,8 +624,10 @@ async def process_movie(movie_url, movie_title, movie_year, download_dir):
 async def main():
     """Main function for movie uploader"""
     print("="*50)
-    print("🎬 Movie Uploader for GitHub")
+    print("🎬 Movie Uploader v2.0 - Same as Series")
     print("="*50)
+    print("⚙️ Settings: 240p, CRF 28, 64k audio (same as series)")
+    print("📝 Caption: 🎬 + Title only (no year)")
     
     # Check dependencies
     print("\n🔍 Checking dependencies...")
@@ -549,14 +657,8 @@ async def main():
         sample_config = {
             "movies": [
                 {
-                    "url": "https://example.com/movie1.mp4",
-                    "title": "Movie Title 1",
-                    "year": "2024"
-                },
-                {
-                    "url": "https://example.com/movie2.mp4", 
-                    "title": "Movie Title 2",
-                    "year": "2023"
+                    "url": "https://larooza.cfd/play.php?vid=956c7e520",
+                    "title": "فيلم تجريبي"
                 }
             ]
         }
@@ -585,12 +687,13 @@ async def main():
     
     # Create working directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    download_dir = f"movies_downloads_{timestamp}"
+    download_dir = f"movies_{timestamp}"
     os.makedirs(download_dir, exist_ok=True)
     
     print(f"\n{'='*50}")
     print("🚀 Starting Movie Processing")
     print('='*50)
+    print(f"⚙️ Quality: 240p (same as series)")
     print(f"📁 Working dir: {download_dir}")
     print(f"⏰ Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
@@ -601,7 +704,6 @@ async def main():
     for index, movie in enumerate(movies, 1):
         movie_url = movie.get("url", "").strip()
         movie_title = movie.get("title", "").strip()
-        movie_year = movie.get("year", "").strip()
         
         if not movie_url:
             print(f"❌ Movie {index}: No URL provided")
@@ -612,13 +714,11 @@ async def main():
             movie_title = f"Movie {index}"
         
         print(f"\n[#{index}] 🎬 {movie_title}")
-        if movie_year:
-            print(f"   📅 Year: {movie_year}")
-        print(f"   🔗 URL: {movie_url[:50]}...")
+        print(f"   🔗 URL: {movie_url[:60]}...")
         
         start_time = time.time()
         success, message = await process_movie(
-            movie_url, movie_title, movie_year, download_dir
+            movie_url, movie_title, download_dir
         )
         
         elapsed = time.time() - start_time
@@ -626,15 +726,16 @@ async def main():
         if success:
             successful += 1
             print(f"✅ {movie_title}: {message}")
-            print(f"   ⏱️ Processing time: {elapsed:.1f} seconds")
+            print(f"   ⏱️ Time: {elapsed:.1f}s")
+            print(f"   🎬 Quality: 240p (series settings)")
         else:
             failed.append(movie_title)
             print(f"❌ {movie_title}: {message}")
         
         # Wait between movies
         if index < len(movies):
-            wait_time = 5
-            print(f"⏳ Waiting {wait_time} seconds before next movie...")
+            wait_time = 3
+            print(f"⏳ Waiting {wait_time} seconds...")
             await asyncio.sleep(wait_time)
     
     # Results summary
@@ -653,6 +754,10 @@ async def main():
     
     if failed:
         print(f"📝 Failed movies: {failed}")
+        print("💡 Tips for failed downloads:")
+        print("   1. Try a different video URL")
+        print("   2. Use direct .mp4 links if possible")
+        print("   3. Check if the video is accessible")
     
     # Cleanup empty directory
     try:
