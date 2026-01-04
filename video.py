@@ -2,8 +2,7 @@
 """
 Universal Video Uploader - For Movies
 Download 240p minimum quality then compress to 240p
-Fixed URL issues with yt-dlp download
-Enhanced upload settings
+Enhanced URL extraction for multiple sites
 """
 
 import os
@@ -17,7 +16,7 @@ import shutil
 import asyncio
 import threading
 from datetime import datetime
-from urllib.parse import urlparse, urljoin, quote
+from urllib.parse import urlparse, urljoin, quote, parse_qs
 
 # ===== CONFIGURATION =====
 TELEGRAM_API_ID = os.environ.get("API_ID", "")
@@ -70,16 +69,19 @@ import cloudscraper
 
 app = None
 
-# Headers for VK
+# Headers for various sites
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.5',
-    'Accept-Encoding': 'gzip, deflate',
+    'Accept-Encoding': 'gzip, deflate, br',
     'DNT': '1',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
-    'Referer': 'https://vk.com/',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
 }
 
 async def setup_telegram():
@@ -270,9 +272,24 @@ def get_minimum_240p_m3u8(m3u8_url):
         print(f"⚠️ Error parsing m3u8: {e}")
         return m3u8_url
 
-def extract_vk_video_url(video_page_url):
-    """Extract video URL from VK.com specifically"""
-    print("🔍 Using VK.com specific extractor...")
+def normalize_vk_url(url):
+    """Normalize VK video URLs to standard format"""
+    # Convert short format to long format
+    # https://vk.com/video791768803_456250107 -> https://vk.com/video_ext.php?oid=791768803&id=456250107
+    match = re.match(r'.*vk\.com/video(\d+)_(\d+)', url)
+    if match:
+        oid = match.group(1)
+        vid = match.group(2)
+        return f"https://vk.com/video_ext.php?oid={oid}&id={vid}"
+    
+    return url
+
+def extract_vk_video_url_advanced(video_page_url):
+    """Advanced VK video URL extraction with multiple methods"""
+    print("🔍 Using advanced VK extractor...")
+    
+    # Normalize URL first
+    video_page_url = normalize_vk_url(video_page_url)
     
     try:
         # Create a scraper to bypass Cloudflare
@@ -286,62 +303,121 @@ def extract_vk_video_url(video_page_url):
             print(f"⚠️ HTTP {response.status_code}")
             return None
         
-        # Look for JSON data with video URLs
-        print("🔍 Searching for video URLs...")
+        # Method 1: Look for JSON data
+        print("🔍 Method 1: Searching for JSON data...")
         
-        # Try to find video URLs in the page
+        # Try to find JSON config
+        json_patterns = [
+            r'var\s+playerParams\s*=\s*({[^;]+});',
+            r'videoPlayerInit\s*\(\s*({[^}]+})',
+            r'var\s+videoData\s*=\s*({[^;]+});',
+        ]
+        
+        for pattern in json_patterns:
+            match = re.search(pattern, response.text, re.DOTALL)
+            if match:
+                try:
+                    json_str = match.group(1)
+                    # Fix JSON string
+                    json_str = json_str.replace('\\"', '"').replace('\\/', '/')
+                    data = json.loads(json_str)
+                    
+                    # Look for video URLs in JSON
+                    if 'hls' in data:
+                        url = clean_vk_url(data['hls'])
+                        if url:
+                            print(f"✅ Found hls URL in JSON")
+                            video_url = get_minimum_240p_m3u8(url)
+                            if video_url:
+                                return video_url
+                    
+                    # Check for mp4 URLs
+                    for key in ['url', 'url240', 'url360', 'url480', 'url720', 'url1080']:
+                        if key in data and data[key]:
+                            url = clean_vk_url(data[key])
+                            if url and '.mp4' in url:
+                                print(f"✅ Found {key} in JSON: {url[:80]}...")
+                                return url
+                except:
+                    pass
+        
+        # Method 2: Look for iframe
+        print("🔍 Method 2: Searching for iframe...")
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Look for all video-related iframes
+        iframes = soup.find_all('iframe')
+        for iframe in iframes:
+            src = iframe.get('src', '')
+            if src and 'video' in src:
+                if src.startswith('//'):
+                    src = 'https:' + src
+                
+                print(f"📺 Found video iframe: {src}")
+                try:
+                    iframe_response = scraper.get(src, headers=HEADERS, timeout=30)
+                    
+                    # Look for m3u8 in iframe
+                    m3u8_patterns = [
+                        r'src="([^"]+\.m3u8[^"]*)"',
+                        r'https?://[^"\']+\.m3u8[^"\']*',
+                    ]
+                    
+                    for pattern in m3u8_patterns:
+                        matches = re.findall(pattern, iframe_response.text)
+                        for match in matches:
+                            url = clean_vk_url(match)
+                            if url and '.m3u8' in url:
+                                print(f"✅ Found m3u8 in iframe")
+                                video_url = get_minimum_240p_m3u8(url)
+                                if video_url:
+                                    return video_url
+                except Exception as e:
+                    print(f"⚠️ Iframe error: {e}")
+        
+        # Method 3: Direct regex search for video URLs
+        print("🔍 Method 3: Direct regex search...")
+        
         video_patterns = [
             r'"hls":"([^"]+)"',
-            r'"url[0-9]+":"([^"]+)"',
-            r'video_url":"([^"]+)"',
-            r'src="([^"]+\.m3u8[^"]*)"',
-            r'\\"url\\":\\"([^\\\\"]+)\\"',
+            r'"url[0-9]*":"([^"]+)"',
+            r'https?://[^"\']+\.m3u8[^"\']*',
+            r'https?://[^"\']+\.mp4[^"\']*',
         ]
         
         for pattern in video_patterns:
             matches = re.findall(pattern, response.text)
             for match in matches:
-                if match and ('http' in match or '.m3u8' in match):
+                if isinstance(match, str) and ('http' in match or '.m3u8' in match or '.mp4' in match):
                     url = clean_vk_url(match)
                     url = fix_cdn_url(url)
                     
-                    if url and '.m3u8' in url:
-                        print(f"🔧 Found m3u8 URL: {url[:80]}...")
-                        # Try to get minimum 240p quality from m3u8
+                    if url and ('.m3u8' in url or '.mp4' in url):
+                        print(f"✅ Found URL with pattern: {url[:80]}...")
+                        if '.m3u8' in url:
+                            video_url = get_minimum_240p_m3u8(url)
+                            if video_url:
+                                return video_url
+                        else:
+                            return url
+        
+        # Method 4: Try to extract from meta tags
+        print("🔍 Method 4: Checking meta tags...")
+        meta_tags = soup.find_all('meta')
+        for meta in meta_tags:
+            content = meta.get('content', '')
+            if 'm3u8' in content or 'mp4' in content:
+                url = clean_vk_url(content)
+                if url and ('http' in url or '//' in url):
+                    print(f"✅ Found URL in meta tag: {url[:80]}...")
+                    if '.m3u8' in url:
                         video_url = get_minimum_240p_m3u8(url)
                         if video_url:
                             return video_url
+                    else:
+                        return url
         
-        # Try to extract from iframe
-        print("🔍 Searching for iframe...")
-        soup = BeautifulSoup(response.text, 'html.parser')
-        iframe = soup.find('iframe')
-        
-        if iframe and iframe.get('src'):
-            iframe_url = iframe['src']
-            if iframe_url.startswith('//'):
-                iframe_url = 'https:' + iframe_url
-            
-            print(f"📺 Found iframe, checking content...")
-            try:
-                iframe_response = scraper.get(iframe_url, headers=HEADERS, timeout=30)
-                
-                # Search in iframe
-                for pattern in video_patterns:
-                    matches = re.findall(pattern, iframe_response.text)
-                    for match in matches:
-                        if match and ('http' in match or '.m3u8' in match):
-                            url = clean_vk_url(match)
-                            url = fix_cdn_url(url)
-                            if url and '.m3u8' in url:
-                                video_url = get_minimum_240p_m3u8(url)
-                                if video_url:
-                                    print(f"✅ Found URL in iframe")
-                                    return video_url
-            except Exception as e:
-                print(f"⚠️ Iframe error: {e}")
-        
-        print("❌ No video URL found")
+        print("❌ No video URL found with any method")
         return None
         
     except Exception as e:
@@ -350,44 +426,181 @@ def extract_vk_video_url(video_page_url):
         traceback.print_exc()
         return None
 
-def extract_video_url(url):
-    """Extract direct video URL with minimum 240p quality"""
-    print(f"🔍 Extracting from: {url}")
+def extract_with_ytdlp(url):
+    """Extract video URL using yt-dlp for any site"""
+    print("🔍 Trying yt-dlp extractor...")
     
-    # Check if it's VK
-    parsed_url = urlparse(url)
-    if 'vk.com' in parsed_url.netloc or 'vkontakte' in parsed_url.netloc:
-        return extract_vk_video_url(url)
-    
-    # For other sites, try yt-dlp with minimum 240p quality
     try:
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'format': 'worst[height>=240][height<=360]/worst[height>=240]/worst',
+            'extract_flat': False,
             'socket_timeout': 30,
+            'force_generic_extractor': False,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            if info and 'url' in info:
+            
+            if not info:
+                return None
+            
+            # Get the best format URL
+            if 'url' in info:
                 video_url = info['url']
-                # Check if we got the right quality
-                if 'height' in info and info['height']:
-                    print(f"✅ Found {info['height']}p URL via yt-dlp")
-                else:
-                    print(f"✅ Found URL via yt-dlp (quality unknown)")
+                height = info.get('height', 0)
+                print(f"✅ yt-dlp found {height}p URL")
                 return video_url
+            
+            # If no direct URL, try to get from formats
+            elif 'formats' in info and info['formats']:
+                # Filter for video formats with height >= 240
+                formats = [f for f in info['formats'] 
+                          if f.get('vcodec') != 'none' and f.get('height', 0) >= 240]
+                
+                if formats:
+                    # Sort by height (lowest first)
+                    formats.sort(key=lambda x: x.get('height', 0))
+                    selected_format = formats[0]
+                    video_url = selected_format['url']
+                    height = selected_format.get('height', 0)
+                    print(f"✅ yt-dlp found {height}p URL from formats")
+                    return video_url
+            
+            print("❌ yt-dlp couldn't extract video URL")
+            return None
+            
     except Exception as e:
-        print(f"⚠️ yt-dlp failed: {e}")
+        print(f"⚠️ yt-dlp extraction failed: {e}")
+        return None
+
+def extract_generic_video_url(url):
+    """Generic video URL extractor for various sites"""
+    print("🔍 Using generic extractor...")
     
+    try:
+        headers = HEADERS.copy()
+        
+        # Set referer based on domain
+        parsed = urlparse(url)
+        headers['Referer'] = f"{parsed.scheme}://{parsed.netloc}"
+        
+        response = requests.get(url, headers=headers, timeout=30)
+        
+        if response.status_code != 200:
+            print(f"⚠️ HTTP {response.status_code}")
+            return None
+        
+        # Look for common video patterns
+        patterns = [
+            r'src=["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'src=["\']([^"\']+\.m3u8[^"\']*)["\']',
+            r'video["\']\s*:\s*["\']([^"\']+)["\']',
+            r'file["\']\s*:\s*["\']([^"\']+)["\']',
+            r'https?://[^"\'\s<>]+\.mp4',
+            r'https?://[^"\'\s<>]+\.m3u8',
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, response.text, re.IGNORECASE)
+            for match in matches:
+                if isinstance(match, str) and ('http' in match or '.mp4' in match or '.m3u8' in match):
+                    # Make absolute URL if relative
+                    if match.startswith('//'):
+                        video_url = 'https:' + match
+                    elif match.startswith('/'):
+                        video_url = f"{parsed.scheme}://{parsed.netloc}{match}"
+                    else:
+                        video_url = match
+                    
+                    print(f"✅ Found URL with pattern: {video_url[:80]}...")
+                    return video_url
+        
+        return None
+        
+    except Exception as e:
+        print(f"⚠️ Generic extraction failed: {e}")
+        return None
+
+def extract_video_url(url):
+    """Extract direct video URL with multiple extraction methods"""
+    print(f"🔍 Extracting from: {url}")
+    
+    # Normalize VK URLs first
+    original_url = url
+    if 'vk.com' in url or 'vkontakte' in url:
+        url = normalize_vk_url(url)
+        print(f"🔧 Normalized VK URL: {url}")
+    
+    # Method 1: Try yt-dlp first (works for many sites)
+    video_url = extract_with_ytdlp(url)
+    if video_url:
+        return video_url
+    
+    # Method 2: Site-specific extractors
+    parsed_url = urlparse(url)
+    
+    # VK.com specific extraction
+    if 'vk.com' in parsed_url.netloc or 'vkontakte' in parsed_url.netloc:
+        print("🔄 Trying VK-specific extractor...")
+        video_url = extract_vk_video_url_advanced(url)
+        if video_url:
+            return video_url
+    
+    # Method 3: Generic extraction for other sites
+    print("🔄 Trying generic extractor...")
+    video_url = extract_generic_video_url(url)
+    if video_url:
+        return video_url
+    
+    # Method 4: Fallback to direct yt-dlp download
+    print("🔄 Fallback: Direct yt-dlp download attempt...")
+    try:
+        # Create a temporary file to test download
+        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+            # Just check if we can get info
+            info = ydl.extract_info(url, download=False)
+            if info:
+                print(f"⚠️ Couldn't extract direct URL, but yt-dlp can access the video")
+                # Return the original URL for yt-dlp to handle
+                return url
+    except:
+        pass
+    
+    print("❌ All extraction methods failed")
     return None
 
 def download_with_ytdlp(url, output_path):
     """Download video using yt-dlp with minimum 240p quality"""
-    print("📥 Downloading with yt-dlp (minimum 240p)...")
+    print("📥 Downloading with yt-dlp...")
     
     try:
+        # Check if it's a direct video URL or needs extraction
+        is_direct_url = any(ext in url.lower() for ext in ['.mp4', '.m3u8', '.webm', '.avi', '.mkv'])
+        
+        if is_direct_url:
+            # Direct video URL, use ffmpeg to download
+            print("🔗 Direct video URL detected, using ffmpeg...")
+            cmd = [
+                'ffmpeg',
+                '-i', url,
+                '-c', 'copy',
+                '-bsf:a', 'aac_adtstoasc',
+                '-y',
+                output_path
+            ]
+            
+            print(f"🔄 Running: ffmpeg -i [URL] -c copy {output_path}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+            
+            if result.returncode == 0 and os.path.exists(output_path):
+                file_size = os.path.getsize(output_path) / (1024 * 1024)
+                print(f"✅ Download complete: {file_size:.1f} MB")
+                return True
+            else:
+                print(f"❌ FFmpeg download failed, trying yt-dlp...")
+        
+        # Use yt-dlp for extraction + download
         ydl_opts = {
             'outtmpl': output_path,
             'format': 'worst[height>=240][height<=360]/worst[height>=240]/worst',
@@ -398,6 +611,9 @@ def download_with_ytdlp(url, output_path):
             'fragment_retries': 3,
             'skip_unavailable_fragments': True,
             'http_headers': HEADERS,
+            'extractor_args': {
+                'vk': ['--referer', 'https://vk.com/'],
+            }
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -692,7 +908,7 @@ async def process_movie(video_url, video_title):
     
     try:
         # Step 1: Extract URL
-        print("1️⃣ Extracting video URL (minimum 240p)...")
+        print("1️⃣ Extracting video URL...")
         direct_url = extract_video_url(video_url)
         
         if not direct_url:
@@ -701,8 +917,8 @@ async def process_movie(video_url, video_title):
         
         print(f"✅ Found URL: {direct_url[:100]}...")
         
-        # Step 2: Download using yt-dlp (minimum 240p)
-        print("2️⃣ Downloading (minimum 240p quality)...")
+        # Step 2: Download
+        print("2️⃣ Downloading video...")
         if not download_with_ytdlp(direct_url, temp_file):
             # Try alternative method
             print("🔄 Trying alternative download method...")
@@ -781,10 +997,9 @@ async def process_movie(video_url, video_title):
 async def main():
     """Main function"""
     print("="*50)
-    print("🎬 Movie Uploader v3.4")
+    print("🎬 Movie Uploader v4.0")
     print("🎯 Strategy: Download Minimum 240p → Compress to 240p")
-    print("⚠️  Ignores 144p when 240p or higher is available")
-    print("🔧 Enhanced upload settings")
+    print("🌐 Enhanced URL extraction for multiple sites")
     print("="*50)
     
     # Check ffmpeg
@@ -805,10 +1020,16 @@ async def main():
     if not os.path.exists(config_file):
         print("❌ Config file not found, creating sample...")
         sample_config = {
-            "videos": [{
-                "url": "https://vk.com/video_ext.php?oid=791768803&id=456249035",
-                "title": "اكس مراتي - الفيلم الكامل"
-            }]
+            "videos": [
+                {
+                    "url": "https://vk.com/video_ext.php?oid=791768803&id=456250107",
+                    "title": "فيلم تجريبي - النسخة الطويلة"
+                },
+                {
+                    "url": "https://vk.com/video791768803_456250107",
+                    "title": "فيلم تجريبي - النسخة القصيرة"
+                }
+            ]
         }
         with open(config_file, 'w', encoding='utf-8') as f:
             json.dump(sample_config, f, ensure_ascii=False, indent=2)
