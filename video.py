@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Universal Video Uploader - Enhanced Version
-Supports multiple sites including vidspeed.org
+Universal Video Uploader - Enhanced Version with Improved m3u8 Support
 """
 
 import os
@@ -14,7 +13,7 @@ import subprocess
 import shutil
 import asyncio
 from datetime import datetime
-from urllib.parse import urlparse, urljoin, parse_qs, quote
+from urllib.parse import urlparse, urljoin, parse_qs, unquote
 from html import unescape
 
 # ===== CONFIGURATION =====
@@ -53,7 +52,7 @@ TELEGRAM_API_ID = int(TELEGRAM_API_ID)
 # Install requirements
 print("📦 Installing requirements...")
 requirements = ["pyrogram", "tgcrypto", "yt-dlp", "requests", "beautifulsoup4", 
-                "cloudscraper", "lxml", "cfscrape", "selenium-wire"]
+                "cloudscraper", "lxml", "m3u8"]
 for req in requirements:
     try:
         subprocess.check_call([sys.executable, "-m", "pip", "install", req, "--quiet"])
@@ -139,251 +138,150 @@ def normalize_url(url):
     
     return url
 
-def extract_vidspeed_video(url):
-    """Extract video from vidspeed.org"""
-    print("🔍 Extracting from vidspeed.org...")
+def get_m3u8_headers(url):
+    """Get appropriate headers for m3u8 URLs based on domain"""
+    headers = HEADERS.copy()
+    
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower()
+    
+    # Add Referer based on domain
+    if 'vkvd' in domain or 'okcdn.ru' in domain:
+        headers['Referer'] = 'https://vk.com/'
+        headers['Origin'] = 'https://vk.com/'
+    elif '1vid.online' in domain:
+        headers['Referer'] = 'https://vk.com/'
+        headers['Origin'] = 'https://vk.com/'
+    elif 'cdnz.quest' in domain:
+        headers['Referer'] = 'https://vk.com/'
+        headers['Origin'] = 'https://vk.com/'
+    
+    return headers
+
+def clean_m3u8_url(url):
+    """Clean m3u8 URL by removing problematic parameters"""
+    if not url or '.m3u8' not in url:
+        return url
+    
+    parsed = urlparse(url)
+    
+    # Keep only essential parameters
+    essential_params = ['t', 's', 'e', 'v', 'f', 'i', 'sp']
+    query_params = parse_qs(parsed.query)
+    
+    # Filter parameters
+    filtered_params = {}
+    for param in essential_params:
+        if param in query_params:
+            filtered_params[param] = query_params[param][0]
+    
+    # Reconstruct URL
+    new_query = '&'.join([f"{k}={v}" for k, v in filtered_params.items()])
+    
+    if new_query:
+        cleaned_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
+    else:
+        cleaned_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    
+    print(f"🧹 Cleaned m3u8 URL: {cleaned_url[:150]}...")
+    return cleaned_url
+
+def get_best_m3u8_quality(m3u8_url):
+    """Get the best available quality from m3u8 playlist"""
+    print("🔍 Analyzing m3u8 playlist...")
     
     try:
-        scraper = cloudscraper.create_scraper()
-        
-        # Fetch the page
-        response = scraper.get(url, headers=HEADERS, timeout=30)
+        headers = get_m3u8_headers(m3u8_url)
+        response = requests.get(m3u8_url, headers=headers, timeout=30)
         
         if response.status_code != 200:
-            print(f"⚠️ HTTP {response.status_code}")
-            return None
+            print(f"❌ Failed to fetch m3u8: HTTP {response.status_code}")
+            return m3u8_url
         
-        html = response.text
+        content = response.text
         
-        # Method 1: Look for iframe sources
-        iframe_patterns = [
-            r'iframe[^>]*src=["\']([^"\']+)["\']',
-            r'player\.setSource\s*\(\s*["\']([^"\']+)["\']',
-            r'sources\s*:\s*\[\s*["\']([^"\']+)["\']',
-        ]
-        
-        for pattern in iframe_patterns:
-            matches = re.findall(pattern, html, re.IGNORECASE)
-            for match in matches:
-                video_url = normalize_url(match)
-                if video_url and ('http' in video_url or '.mp4' in video_url or '.m3u8' in video_url):
-                    print(f"✅ Found video URL in iframe: {video_url[:100]}...")
-                    return video_url
-        
-        # Method 2: Look for video sources in script tags
-        script_patterns = [
-            r'file\s*:\s*["\']([^"\']+)["\']',
-            r'src\s*:\s*["\']([^"\']+)["\']',
-            r'video_url\s*:\s*["\']([^"\']+)["\']',
-            r'url\s*:\s*["\']([^"\']+)["\']',
-            r'mp4["\' ]*:["\' ]*([^"\'\s,]+)',
-            r'"mp4":"([^"]+)"',
-        ]
-        
-        for pattern in script_patterns:
-            matches = re.findall(pattern, html, re.IGNORECASE)
-            for match in matches:
-                video_url = normalize_url(match)
-                if video_url and ('mp4' in video_url or 'm3u8' in video_url):
-                    print(f"✅ Found video URL in script: {video_url[:100]}...")
-                    return video_url
-        
-        # Method 3: Look for video tags
-        soup = BeautifulSoup(html, 'html.parser')
-        video_tags = soup.find_all('video')
-        for video in video_tags:
-            source = video.find('source')
-            if source and source.get('src'):
-                video_url = normalize_url(source.get('src'))
-                if video_url:
-                    print(f"✅ Found video URL in video tag: {video_url[:100]}...")
-                    return video_url
-        
-        # Method 4: Look for JSON data
-        json_patterns = [
-            r'playerConfig\s*=\s*({[^}]+})',
-            r'config\s*=\s*({[^}]+})',
-            r'videoData\s*=\s*({[^}]+})',
-        ]
-        
-        for pattern in json_patterns:
-            match = re.search(pattern, html, re.DOTALL)
-            if match:
-                try:
-                    json_str = match.group(1)
-                    json_str = json_str.replace('\\"', '"').replace("\\'", "'")
-                    data = json.loads(json_str)
+        # Check if this is a master playlist
+        if '#EXT-X-STREAM-INF' in content:
+            print("📊 Master playlist detected, finding available qualities...")
+            
+            lines = content.split('\n')
+            streams = []
+            current_stream = {}
+            
+            for line in lines:
+                if line.startswith('#EXT-X-STREAM-INF'):
+                    # Extract resolution
+                    res_match = re.search(r'RESOLUTION=(\d+)x(\d+)', line)
+                    if res_match:
+                        width = int(res_match.group(1))
+                        height = int(res_match.group(2))
+                        current_stream = {
+                            'height': height,
+                            'width': width,
+                            'url': None
+                        }
+                        
+                        # Extract bandwidth if available
+                        bw_match = re.search(r'BANDWIDTH=(\d+)', line)
+                        if bw_match:
+                            current_stream['bandwidth'] = int(bw_match.group(1))
+                
+                elif line and not line.startswith('#') and current_stream:
+                    current_stream['url'] = line.strip()
                     
-                    # Search for video URLs in JSON
-                    def search_json(obj):
-                        if isinstance(obj, dict):
-                            for key, value in obj.items():
-                                if isinstance(value, str) and ('mp4' in value or 'm3u8' in value):
-                                    video_url = normalize_url(value)
-                                    if video_url:
-                                        return video_url
-                                elif isinstance(value, (dict, list)):
-                                    result = search_json(value)
-                                    if result:
-                                        return result
-                        elif isinstance(obj, list):
-                            for item in obj:
-                                result = search_json(item)
-                                if result:
-                                    return result
-                        return None
+                    # Make URL absolute if relative
+                    if not current_stream['url'].startswith('http'):
+                        base_url = '/'.join(m3u8_url.split('/')[:-1])
+                        current_stream['url'] = f"{base_url}/{current_stream['url']}"
                     
-                    video_url = search_json(data)
-                    if video_url:
-                        print(f"✅ Found video URL in JSON: {video_url[:100]}...")
-                        return video_url
-                except:
-                    pass
+                    streams.append(current_stream.copy())
+                    current_stream = {}
+            
+            if streams:
+                # Sort by height (lowest first, but ignore too low qualities)
+                streams.sort(key=lambda x: x['height'])
+                
+                print(f"📊 Available qualities:")
+                for stream in streams:
+                    quality = f"{stream['height']}p"
+                    print(f"  • {quality}")
+                
+                # Strategy: Find minimum 240p or closest to it
+                target_quality = 240
+                selected_stream = None
+                
+                # Try to find exact 240p
+                for stream in streams:
+                    if stream['height'] == target_quality:
+                        selected_stream = stream
+                        print(f"✅ Found exact {target_quality}p quality")
+                        break
+                
+                # If not found, find the closest higher quality
+                if not selected_stream:
+                    for stream in streams:
+                        if stream['height'] >= target_quality:
+                            selected_stream = stream
+                            print(f"⚠️ No {target_quality}p found, selecting {stream['height']}p")
+                            break
+                
+                # If still not found, take the lowest available
+                if not selected_stream:
+                    selected_stream = streams[0]
+                    print(f"⚠️ Only {selected_stream['height']}p available")
+                
+                print(f"✅ Selected: {selected_stream['height']}p")
+                
+                # Clean the selected URL
+                selected_url = clean_m3u8_url(selected_stream['url'])
+                return selected_url
         
-        # Method 5: Look for base64 encoded data
-        base64_patterns = [
-            r'data-video=["\']([^"\']+)["\']',
-            r'data-src=["\']([^"\']+)["\']',
-            r'base64,[^"\']*',
-        ]
-        
-        for pattern in base64_patterns:
-            matches = re.findall(pattern, html, re.IGNORECASE)
-            for match in matches:
-                if len(match) > 100:  # Likely a video URL
-                    video_url = normalize_url(match)
-                    print(f"✅ Found video URL in data attribute: {video_url[:100]}...")
-                    return video_url
-        
-        print("❌ Could not extract video URL from vidspeed")
-        return None
+        # If not a master playlist or parsing failed, return cleaned original URL
+        return clean_m3u8_url(m3u8_url)
         
     except Exception as e:
-        print(f"⚠️ vidspeed extraction error: {e}")
-        return None
-
-def extract_streamtape_video(url):
-    """Extract video from streamtape"""
-    print("🔍 Extracting from streamtape...")
-    
-    try:
-        scraper = cloudscraper.create_scraper()
-        response = scraper.get(url, headers=HEADERS, timeout=30)
-        
-        if response.status_code != 200:
-            return None
-        
-        html = response.text
-        
-        # Look for the video URL pattern
-        patterns = [
-            r'ById\("videolink"\)\.innerHTML\s*=\s*["\']([^"\']+)["\']',
-            r'getElementById\(["\']videolink["\']\)[^=]+=\s*["\']([^"\']+)["\']',
-            r'video.src\s*=\s*["\']([^"\']+)["\']',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, html)
-            if match:
-                video_url = match.group(1)
-                video_url = normalize_url(video_url)
-                if video_url.startswith('//'):
-                    video_url = 'https:' + video_url
-                print(f"✅ Found streamtape URL: {video_url[:100]}...")
-                return video_url
-        
-        return None
-    except Exception as e:
-        print(f"⚠️ streamtape error: {e}")
-        return None
-
-def extract_doodstream_video(url):
-    """Extract video from doodstream"""
-    print("🔍 Extracting from doodstream...")
-    
-    try:
-        scraper = cloudscraper.create_scraper()
-        response = scraper.get(url, headers=HEADERS, timeout=30)
-        
-        if response.status_code != 200:
-            return None
-        
-        html = response.text
-        
-        # Look for the pass_md5 pattern
-        match = re.search(r"/pass_md5/[^'\"]+", html)
-        if match:
-            base_url = match.group(0)
-            # Get the token
-            token_match = re.search(r"token=([^&'\"]+)", html)
-            if token_match:
-                token = token_match.group(1)
-                video_url = f"https://dood.pm{base_url}/{token}"
-                print(f"✅ Found doodstream URL: {video_url[:100]}...")
-                return video_url
-        
-        return None
-    except Exception as e:
-        print(f"⚠️ doodstream error: {e}")
-        return None
-
-def extract_mp4upload_video(url):
-    """Extract video from mp4upload"""
-    print("🔍 Extracting from mp4upload...")
-    
-    try:
-        scraper = cloudscraper.create_scraper()
-        response = scraper.get(url, headers=HEADERS, timeout=30)
-        
-        if response.status_code != 200:
-            return None
-        
-        html = response.text
-        
-        # Look for the video URL
-        match = re.search(r'src:\s*["\']([^"\']+\.mp4[^"\']*)["\']', html)
-        if match:
-            video_url = normalize_url(match.group(1))
-            print(f"✅ Found mp4upload URL: {video_url[:100]}...")
-            return video_url
-        
-        return None
-    except Exception as e:
-        print(f"⚠️ mp4upload error: {e}")
-        return None
-
-def extract_videobin_video(url):
-    """Extract video from videobin.co"""
-    print("🔍 Extracting from videobin...")
-    
-    try:
-        scraper = cloudscraper.create_scraper()
-        response = scraper.get(url, headers=HEADERS, timeout=30)
-        
-        if response.status_code != 200:
-            return None
-        
-        html = response.text
-        
-        # Look for video source
-        patterns = [
-            r'playerInstance\.setup\(\s*{[\s\S]*?sources\s*:\s*\[\s*{\s*file\s*:\s*["\']([^"\']+)["\']',
-            r'src\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
-            r'file["\' ]*:["\' ]*["\' ]*([^"\'\s,]+)',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, html, re.DOTALL)
-            if match:
-                video_url = normalize_url(match.group(1))
-                if video_url:
-                    print(f"✅ Found videobin URL: {video_url[:100]}...")
-                    return video_url
-        
-        return None
-    except Exception as e:
-        print(f"⚠️ videobin error: {e}")
-        return None
+        print(f"⚠️ Error analyzing m3u8: {e}")
+        return clean_m3u8_url(m3u8_url)
 
 def extract_vk_video_enhanced(url):
     """Enhanced VK video extraction"""
@@ -402,165 +300,75 @@ def extract_vk_video_enhanced(url):
         response = scraper.get(url, headers=HEADERS, timeout=30)
         
         if response.status_code != 200:
+            print(f"❌ HTTP {response.status_code}")
             return None
         
         html = response.text
         
-        # Multiple extraction methods for VK
-        patterns = [
-            r'"url[0-9]*":"([^"]+)"',
-            r'"hls":"([^"]+)"',
-            r'video[^"]*"url":"([^"]+)"',
-            r'src="([^"]+\.m3u8[^"]*)"',
-            r'file":"([^"]+)"',
+        # First try to find mp4 URLs
+        mp4_patterns = [
+            r'"url(?:240|360|480|720|1080)?"\s*:\s*"([^"]+\.mp4[^"]*)"',
+            r'"mp4(?:_url)?"\s*:\s*"([^"]+)"',
+            r'file\s*:\s*"([^"]+\.mp4)"',
         ]
         
-        for pattern in patterns:
-            matches = re.findall(pattern, html)
-            for match in matches:
-                video_url = normalize_url(match)
-                if video_url and ('mp4' in video_url or 'm3u8' in video_url):
-                    print(f"✅ Found VK URL: {video_url[:100]}...")
-                    
-                    # If it's m3u8, get the lowest quality
-                    if '.m3u8' in video_url:
-                        # Simple m3u8 quality selection
-                        try:
-                            m3u8_response = requests.get(video_url, headers=HEADERS, timeout=10)
-                            if m3u8_response.status_code == 200:
-                                lines = m3u8_response.text.split('\n')
-                                for line in lines:
-                                    if line and not line.startswith('#') and '.m3u8' in line:
-                                        if not line.startswith('http'):
-                                            base = '/'.join(video_url.split('/')[:-1])
-                                            line = f"{base}/{line}"
-                                        return line
-                        except:
-                            pass
-                    
-                    return video_url
-        
-        return None
-    except Exception as e:
-        print(f"⚠️ VK enhanced error: {e}")
-        return None
-
-def extract_generic_embed(url):
-    """Generic embed video extraction"""
-    print("🔍 Generic embed extraction...")
-    
-    try:
-        scraper = cloudscraper.create_scraper()
-        response = scraper.get(url, headers=HEADERS, timeout=30)
-        
-        if response.status_code != 200:
-            return None
-        
-        html = response.text
-        
-        # Comprehensive patterns for various sites
-        patterns = [
-            # JavaScript patterns
-            r'file["\']?\s*:\s*["\']([^"\']+)["\']',
-            r'sources?\s*:\s*\[\s*{\s*file\s*:\s*["\']([^"\']+)["\']',
-            r'player\.(?:load|setup)\([^)]*["\']([^"\']+\.(?:mp4|m3u8))["\']',
-            r'video(?:URL|Src)\s*[=:]\s*["\']([^"\']+)["\']',
-            
-            # HTML patterns
-            r'<source[^>]+src=["\']([^"\']+)["\']',
-            r'video[^>]+src=["\']([^"\']+)["\']',
-            r'iframe[^>]+src=["\']([^"\']+)["\']',
-            
-            # Data patterns
-            r'data-(?:video|src|file)=["\']([^"\']+)["\']',
-            
-            # Direct URL patterns
-            r'(https?://[^\s"\']+\.(?:mp4|m3u8|webm|avi|mkv|flv)[^\s"\']*)',
-            r'(https?://[^\s"\']+/video/[^\s"\']+)',
-            r'(https?://[^\s"\']+/v/[^\s"\']+)',
-        ]
-        
-        for pattern in patterns:
+        for pattern in mp4_patterns:
             matches = re.findall(pattern, html, re.IGNORECASE)
             for match in matches:
-                if isinstance(match, str):
-                    video_url = normalize_url(match)
-                    
-                    # Filter out false positives
-                    if (video_url and len(video_url) > 20 and 
-                        any(ext in video_url.lower() for ext in ['.mp4', '.m3u8', '.webm', 'video', '/v/']) and
-                        not any(bad in video_url.lower() for bad in ['google', 'facebook', 'twitter', 'script', '.js', '.css'])):
-                        
-                        print(f"✅ Found generic URL: {video_url[:100]}...")
-                        
-                        # If it's a relative URL, make it absolute
-                        if video_url.startswith('//'):
-                            video_url = 'https:' + video_url
-                        elif video_url.startswith('/'):
-                            parsed = urlparse(url)
-                            video_url = f"{parsed.scheme}://{parsed.netloc}{video_url}"
-                        
-                        return video_url
+                video_url = normalize_url(match)
+                if video_url and '.mp4' in video_url:
+                    print(f"✅ Found MP4 URL: {video_url[:100]}...")
+                    return video_url
         
-        # Try to find iframe and extract from it
+        # If no mp4 found, look for m3u8
+        m3u8_patterns = [
+            r'"hls"\s*:\s*"([^"]+)"',
+            r'src\s*:\s*"([^"]+\.m3u8[^"]*)"',
+            r'file\s*:\s*"([^"]+\.m3u8)"',
+            r'https?://[^"\']+\.m3u8[^"\']*',
+        ]
+        
+        for pattern in m3u8_patterns:
+            matches = re.findall(pattern, html, re.IGNORECASE)
+            for match in matches:
+                video_url = normalize_url(match)
+                if video_url and '.m3u8' in video_url:
+                    print(f"✅ Found m3u8 URL: {video_url[:100]}...")
+                    
+                    # Clean and get best quality
+                    cleaned_url = clean_m3u8_url(video_url)
+                    best_url = get_best_m3u8_quality(cleaned_url)
+                    
+                    return best_url
+        
+        # Try to find in iframes
         soup = BeautifulSoup(html, 'html.parser')
         iframes = soup.find_all('iframe')
         for iframe in iframes:
             src = iframe.get('src', '')
             if src and 'http' in src:
-                print(f"🔍 Found iframe: {src}")
-                # Recursively extract from iframe
-                nested_url = extract_video_url(src)
-                if nested_url:
-                    return nested_url
+                print(f"🔍 Found iframe: {src[:100]}...")
+                iframe_url = normalize_url(src)
+                # Recursive extraction from iframe
+                try:
+                    iframe_response = scraper.get(iframe_url, headers=HEADERS, timeout=30)
+                    iframe_html = iframe_response.text
+                    
+                    # Look for m3u8 in iframe
+                    for pattern in m3u8_patterns:
+                        iframe_matches = re.findall(pattern, iframe_html, re.IGNORECASE)
+                        for iframe_match in iframe_matches:
+                            video_url = normalize_url(iframe_match)
+                            if video_url and '.m3u8' in video_url:
+                                print(f"✅ Found m3u8 in iframe: {video_url[:100]}...")
+                                cleaned_url = clean_m3u8_url(video_url)
+                                return cleaned_url
+                except:
+                    pass
         
         return None
     except Exception as e:
-        print(f"⚠️ Generic embed error: {e}")
-        return None
-
-def extract_with_ytdlp(url):
-    """Extract video URL using yt-dlp"""
-    print("🔍 Trying yt-dlp extractor...")
-    
-    try:
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'socket_timeout': 30,
-            'extract_flat': False,
-            'force_generic_extractor': True,
-            'http_headers': HEADERS,
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            if not info:
-                return None
-            
-            # Try to get direct URL
-            if 'url' in info:
-                video_url = info['url']
-                print(f"✅ yt-dlp found direct URL: {video_url[:100]}...")
-                return video_url
-            
-            # Try formats
-            elif 'formats' in info and info['formats']:
-                # Get the worst quality (for smaller file size)
-                formats = [f for f in info['formats'] if f.get('vcodec') != 'none']
-                if formats:
-                    formats.sort(key=lambda x: x.get('height', 0))
-                    selected = formats[0]
-                    video_url = selected['url']
-                    height = selected.get('height', 0)
-                    print(f"✅ yt-dlp found {height}p URL")
-                    return video_url
-            
-            return None
-            
-    except Exception as e:
-        print(f"⚠️ yt-dlp extraction failed: {e}")
+        print(f"⚠️ VK enhanced error: {e}")
         return None
 
 def extract_video_url(url):
@@ -572,100 +380,117 @@ def extract_video_url(url):
     parsed = urlparse(url)
     domain = parsed.netloc.lower()
     
-    # Site-specific extractors
-    extractors = [
-        # vidspeed and similar
-        ('vidspeed.org', extract_vidspeed_video),
-        ('streamtape.com', extract_streamtape_video),
-        ('doodstream.com', extract_doodstream_video),
-        ('dood.pm', extract_doodstream_video),
-        ('mp4upload.com', extract_mp4upload_video),
-        ('videobin.co', extract_videobin_video),
-        ('vk.com', extract_vk_video_enhanced),
-        ('vkontakte', extract_vk_video_enhanced),
-    ]
-    
-    # Try site-specific extractor first
-    for site_pattern, extractor in extractors:
-        if site_pattern in domain:
-            print(f"🔄 Using {site_pattern} extractor...")
-            result = extractor(url)
-            if result:
-                return result
-    
-    # Try generic embed extractor
-    print("🔄 Trying generic embed extractor...")
-    result = extract_generic_embed(url)
-    if result:
-        return result
-    
-    # Try yt-dlp as fallback
-    print("🔄 Trying yt-dlp as fallback...")
-    result = extract_with_ytdlp(url)
-    if result:
-        return result
-    
-    # Last resort: direct URL (for some embedded players)
-    print("🔄 Checking if URL is already direct video...")
-    if any(ext in url.lower() for ext in ['.mp4', '.m3u8', '.webm', 'video/', '/v/']):
-        print(f"✅ URL appears to be direct video")
+    # Check if it's already a direct video URL
+    if any(ext in url.lower() for ext in ['.mp4', '.m3u8', '.webm', '.avi', '.mkv']):
+        print("✅ URL appears to be direct video")
+        
+        # If it's m3u8, clean it and get best quality
+        if '.m3u8' in url.lower():
+            print("🔄 Processing m3u8 URL...")
+            cleaned_url = clean_m3u8_url(url)
+            best_url = get_best_m3u8_quality(cleaned_url)
+            return best_url
         return url
     
-    print("❌ All extraction methods failed")
-    return None
+    # Site-specific extractors
+    if 'vk.com' in domain or 'vkontakte' in domain:
+        print("🔄 Using VK extractor...")
+        return extract_vk_video_enhanced(url)
+    
+    # Generic extraction for other sites
+    print("🔄 Trying generic extraction...")
+    try:
+        scraper = cloudscraper.create_scraper()
+        response = scraper.get(url, headers=HEADERS, timeout=30)
+        
+        if response.status_code != 200:
+            print(f"❌ HTTP {response.status_code}")
+            return None
+        
+        html = response.text
+        
+        # Look for video URLs
+        patterns = [
+            r'src=["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'src=["\']([^"\']+\.m3u8[^"\']*)["\']',
+            r'file\s*:\s*["\']([^"\']+)["\']',
+            r'video\s*:\s*["\']([^"\']+)["\']',
+            r'https?://[^"\']+\.mp4[^"\']*',
+            r'https?://[^"\']+\.m3u8[^"\']*',
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, html, re.IGNORECASE)
+            for match in matches:
+                video_url = normalize_url(match)
+                if video_url:
+                    print(f"✅ Found URL: {video_url[:100]}...")
+                    
+                    # If it's m3u8, process it
+                    if '.m3u8' in video_url.lower():
+                        cleaned_url = clean_m3u8_url(video_url)
+                        best_url = get_best_m3u8_quality(cleaned_url)
+                        return best_url
+                    
+                    return video_url
+        
+        return None
+    except Exception as e:
+        print(f"⚠️ Generic extraction failed: {e}")
+        return None
 
 def download_with_ytdlp(url, output_path):
-    """Download video using yt-dlp with adaptive quality selection"""
+    """Download video using yt-dlp with enhanced m3u8 support"""
     print("📥 Downloading with yt-dlp...")
     
     try:
-        # Check if it's a direct video URL
-        is_direct = any(ext in url.lower() for ext in ['.mp4', '.m3u8', '.webm', '.avi', '.mkv', '.flv'])
+        # Get appropriate headers for the URL
+        headers = get_m3u8_headers(url)
         
-        if is_direct:
-            print("🔗 Direct video URL detected")
-            # Use ffmpeg for direct URLs
-            cmd = [
-                'ffmpeg',
-                '-i', url,
-                '-c', 'copy',
-                '-bsf:a', 'aac_adtstoasc',
-                '-y',
-                output_path
-            ]
+        # Check if it's m3u8
+        is_m3u8 = '.m3u8' in url.lower()
+        
+        if is_m3u8:
+            print("🎬 Processing m3u8 stream...")
             
-            print(f"🔄 Downloading with ffmpeg...")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-            
-            if result.returncode == 0 and os.path.exists(output_path):
-                file_size = os.path.getsize(output_path) / (1024 * 1024)
-                print(f"✅ FFmpeg download complete: {file_size:.1f} MB")
-                return True
-            else:
-                print(f"⚠️ FFmpeg failed: {result.stderr[:200]}")
+            # Use yt-dlp with specific options for m3u8
+            ydl_opts = {
+                'outtmpl': output_path,
+                'format': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
+                'quiet': False,
+                'no_warnings': False,
+                'socket_timeout': 30,
+                'retries': 10,
+                'fragment_retries': 10,
+                'skip_unavailable_fragments': True,
+                'http_headers': headers,
+                'extractor_args': {
+                    'generic': {
+                        'no_check_certificate': True,
+                    }
+                },
+                'postprocessor_args': {
+                    'ffmpeg': [
+                        '-c', 'copy',
+                        '-bsf:a', 'aac_adtstoasc',
+                    ]
+                },
+            }
+        else:
+            # For direct URLs or other formats
+            ydl_opts = {
+                'outtmpl': output_path,
+                'format': 'worst[height>=240]/worst',
+                'quiet': False,
+                'no_warnings': False,
+                'socket_timeout': 30,
+                'retries': 10,
+                'fragment_retries': 10,
+                'skip_unavailable_fragments': True,
+                'http_headers': headers,
+            }
         
-        # Use yt-dlp with adaptive quality selection
-        ydl_opts = {
-            'outtmpl': output_path,
-            # Adaptive quality selection: worst quality but at least 240p if available
-            'format': 'worst[height>=240]/worst',
-            'quiet': False,
-            'no_warnings': False,
-            'socket_timeout': 30,
-            'retries': 10,
-            'fragment_retries': 10,
-            'skip_unavailable_fragments': True,
-            'http_headers': HEADERS,
-            'extractor_args': {
-                'generic': ['--referer', url],
-            },
-            'postprocessors': [{
-                'key': 'FFmpegVideoConvertor',
-                'preferedformat': 'mp4',
-            }],
-        }
-        
-        print(f"🎬 Downloading with yt-dlp...")
+        print(f"🎬 Downloading from: {url[:150]}...")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             
@@ -678,51 +503,51 @@ def download_with_ytdlp(url, output_path):
             print(f"✅ Download complete: {file_size:.1f} MB")
             return True
         else:
-            print("❌ Download failed")
+            print("❌ Download failed - file not created")
             return False
             
     except Exception as e:
-        print(f"❌ Download failed: {e}")
+        print(f"❌ yt-dlp download failed: {e}")
         return False
 
 def download_fallback(url, output_path):
-    """Fallback download method"""
-    print("🔄 Using fallback download...")
+    """Fallback download method for m3u8"""
+    print("🔄 Using ffmpeg fallback for m3u8...")
     
     try:
-        headers = HEADERS.copy()
-        response = requests.get(url, headers=headers, stream=True, timeout=60)
+        headers = get_m3u8_headers(url)
         
-        if response.status_code != 200:
-            print(f"❌ HTTP {response.status_code}")
+        # Build ffmpeg command with headers
+        cmd = [
+            'ffmpeg',
+            '-headers', f"User-Agent: {headers.get('User-Agent', HEADERS['User-Agent'])}",
+        ]
+        
+        # Add Referer if available
+        if 'Referer' in headers:
+            cmd.extend(['-headers', f"Referer: {headers['Referer']}"])
+        
+        cmd.extend([
+            '-i', url,
+            '-c', 'copy',
+            '-bsf:a', 'aac_adtstoasc',
+            '-y',
+            output_path
+        ])
+        
+        print(f"🔄 Running ffmpeg with headers...")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        
+        if result.returncode == 0 and os.path.exists(output_path):
+            file_size = os.path.getsize(output_path) / (1024 * 1024)
+            print(f"✅ FFmpeg download complete: {file_size:.1f} MB")
+            return True
+        else:
+            print(f"❌ FFmpeg failed: {result.stderr[:200]}")
             return False
-        
-        total_size = int(response.headers.get('content-length', 0))
-        print(f"📥 Downloading {total_size / (1024*1024):.1f} MB...")
-        
-        with open(output_path, 'wb') as f:
-            downloaded = 0
-            start_time = time.time()
             
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    
-                    # Show progress every 10MB
-                    if downloaded % (10 * 1024 * 1024) < 8192:
-                        elapsed = time.time() - start_time
-                        speed = downloaded / elapsed / 1024 if elapsed > 0 else 0
-                        print(f"📥 {downloaded / (1024*1024):.1f} MB - {speed:.0f} KB/s")
-        
-        elapsed = time.time() - start_time
-        final_size = os.path.getsize(output_path) / (1024 * 1024)
-        print(f"✅ Fallback download complete: {final_size:.1f} MB in {elapsed:.1f}s")
-        
-        return final_size > 1
-        
     except Exception as e:
-        print(f"❌ Fallback download failed: {e}")
+        print(f"❌ FFmpeg fallback failed: {e}")
         return False
 
 def compress_video(input_path, output_path):
@@ -907,13 +732,19 @@ async def process_video(url, title):
             print("❌ Failed to extract video URL")
             return False, "Extraction failed"
         
-        print(f"✅ Extracted URL: {video_url[:100]}...")
+        print(f"✅ Extracted URL: {video_url[:150]}...")
         
         # Step 2: Download
         print("2️⃣ Downloading...")
+        
+        # Try yt-dlp first
         if not download_with_ytdlp(video_url, temp_file):
-            print("🔄 Trying fallback download...")
-            if not download_fallback(video_url, temp_file):
+            # If yt-dlp fails, try ffmpeg fallback for m3u8
+            if '.m3u8' in video_url.lower():
+                print("🔄 Trying ffmpeg fallback for m3u8...")
+                if not download_fallback(video_url, temp_file):
+                    return False, "Download failed"
+            else:
                 return False, "Download failed"
         
         # Check file
@@ -979,9 +810,9 @@ async def process_video(url, title):
 async def main():
     """Main function"""
     print("="*60)
-    print("🎬 Universal Video Uploader v5.0")
-    print("🌐 Supports: vidspeed.org, streamtape, doodstream, mp4upload,")
-    print("             videobin, VK, and many other sites")
+    print("🎬 Universal Video Uploader v6.0")
+    print("🌐 Enhanced m3u8 support with quality selection")
+    print("🔧 Automatic parameter cleaning and header management")
     print("="*60)
     
     # Check ffmpeg
