@@ -560,102 +560,201 @@ def extract_with_cloudscraper(url):
     return None
 
 def extract_vidspeed_video_url(url):
-    """Extract video URL from vidspeed.org"""
-    print("🔍 Using vidspeed extractor...")
+    """Extract video URL from vidspeed.org - Enhanced version"""
+    print("🔍 Using enhanced vidspeed extractor...")
     
     try:
-        headers = HEADERS.copy()
-        headers['Referer'] = 'https://vidspeed.org/'
-        headers['Accept'] = '*/*'
-        headers['Accept-Language'] = 'en-US,en;q=0.9'
-        headers['Sec-Fetch-Dest'] = 'empty'
-        headers['Sec-Fetch-Mode'] = 'cors'
-        headers['Sec-Fetch-Site'] = 'same-origin'
+        # Try cloudscraper first to bypass any protections
+        scraper = cloudscraper.create_scraper()
         
-        # First get the embed page
-        response = requests.get(url, headers=headers, timeout=30)
+        headers = HEADERS.copy()
+        headers.update({
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://vidspeed.org/',
+            'Sec-Fetch-Dest': 'iframe',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'cross-site',
+            'Upgrade-Insecure-Requests': '1'
+        })
+        
+        print("🌐 Fetching vidspeed page with cloudscraper...")
+        response = scraper.get(url, headers=headers, timeout=30)
         
         if response.status_code != 200:
             print(f"⚠️ HTTP {response.status_code}")
             return None
         
-        soup = BeautifulSoup(response.text, 'html.parser')
+        content = response.text
         
-        # Look for iframe with video source
-        iframe = soup.find('iframe')
-        if iframe:
-            iframe_src = iframe.get('src')
-            if iframe_src:
-                if iframe_src.startswith('//'):
-                    iframe_src = 'https:' + iframe_src
-                print(f"📺 Found iframe: {iframe_src}")
-                # Try to extract from the iframe
-                return extract_video_url(iframe_src)
+        # Debug: Save page for analysis
+        with open('vidspeed_debug.html', 'w', encoding='utf-8') as f:
+            f.write(content[:10000])
+        print("📝 Saved page snippet for debugging")
         
-        # Look for JavaScript variables with video URLs
-        script_patterns = [
-            r'file:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
-            r'src:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
-            r'videoUrl:\s*["\']([^"\']+)["\']',
-            r'https?://[^"\']+\.mp4[^"\']*',
-            r'https?://[^"\']+\.m3u8[^"\']*'
+        # Method 1: Look for iframe embeds
+        print("🔍 Method 1: Looking for iframe embeds...")
+        iframe_patterns = [
+            r'iframe[^>]+src=["\']([^"\']+)["\']',
+            r'src=["\'](https?://[^"\']+/embed/[^"\']+)["\']',
+            r'iframe[^>]+src=["\'](//[^"\']+)["\']',
+            r'src=["\'](//[^"\']+/embed/[^"\']+)["\']',
         ]
         
-        for pattern in script_patterns:
-            matches = re.findall(pattern, response.text)
+        for pattern in iframe_patterns:
+            matches = re.findall(pattern, content, re.IGNORECASE)
             for match in matches:
-                if isinstance(match, str) and ('http' in match or '.mp4' in match or '.m3u8' in match):
-                    if match.startswith('//'):
-                        match = 'https:' + match
-                    print(f"✅ Found URL in script: {match[:80]}...")
-                    return match
+                if match:
+                    iframe_url = match if match.startswith('http') else 'https:' + match
+                    print(f"📺 Found iframe: {iframe_url}")
+                    
+                    # Try to extract from iframe
+                    iframe_headers = headers.copy()
+                    iframe_headers['Referer'] = url
+                    
+                    try:
+                        iframe_response = scraper.get(iframe_url, headers=iframe_headers, timeout=30)
+                        if iframe_response.status_code == 200:
+                            iframe_content = iframe_response.text
+                            
+                            # Look for video sources in iframe
+                            video_patterns = [
+                                r'src=["\']([^"\']+\.mp4(?:\?[^"\']*)?)["\']',
+                                r'file["\']\s*:\s*["\']([^"\']+)["\']',
+                                r'videoUrl["\']\s*:\s*["\']([^"\']+)["\']',
+                                r'sources\s*:\s*\[[^\]]*"([^"]+\.mp4[^"]*)"[^\]]*\]',
+                                r'"file"\s*:\s*"([^"]+)"',
+                                r'"url"\s*:\s*"([^"]+)"',
+                            ]
+                            
+                            for video_pattern in video_patterns:
+                                video_matches = re.findall(video_pattern, iframe_content, re.IGNORECASE)
+                                for video_match in video_matches:
+                                    if video_match and ('mp4' in video_match or 'm3u8' in video_match):
+                                        video_url = video_match if video_match.startswith('http') else 'https:' + video_match
+                                        print(f"✅ Found video URL in iframe: {video_url[:80]}...")
+                                        return video_url
+                    except Exception as e:
+                        print(f"⚠️ Iframe extraction error: {e}")
         
-        # Try to get the direct video from the page
-        video_tags = soup.find_all('video')
-        for video in video_tags:
-            source = video.find('source')
-            if source:
-                src = source.get('src')
-                if src:
-                    if src.startswith('//'):
-                        src = 'https:' + src
-                    elif not src.startswith('http'):
-                        parsed = urlparse(url)
-                        src = f"{parsed.scheme}://{parsed.netloc}{src if src.startswith('/') else '/' + src}"
-                    print(f"🎬 Found video source: {src[:80]}...")
-                    return src
-        
-        # Try alternative extraction by looking for common video hosting patterns
-        # vidspeed might redirect to other services
-        redirect_patterns = [
-            r'https?://[^"\']+vidstream[^"\']*',
-            r'https?://[^"\']+streamtape[^"\']*',
-            r'https?://[^/\s]+/e/[^\s"\']+',
-            r'https?://[^/\s]+/v/[^\s"\']+'
+        # Method 2: Look for video hosting redirects
+        print("🔍 Method 2: Looking for video hosting redirects...")
+        hosting_patterns = [
+            r'https?://[^"\'\s]+\.streamtape\.com/[^"\'\s]+',
+            r'https?://[^"\'\s]+\.vidstream\.pro/[^"\'\s]+',
+            r'https?://[^"\'\s]+\.vidcloud\.co/[^"\'\s]+',
+            r'https?://[^"\'\s]+\.vidbom\.com/[^"\'\s]+',
+            r'https?://[^"\'\s]+\.mp4upload\.com/[^"\'\s]+',
+            r'https?://[^"\'\s]+\.videobin\.co/[^"\'\s]+',
         ]
         
-        for pattern in redirect_patterns:
-            matches = re.findall(pattern, response.text)
+        for pattern in hosting_patterns:
+            matches = re.findall(pattern, content)
             for match in matches:
-                if 'http' in match:
-                    print(f"🔗 Found potential redirect: {match[:80]}...")
-                    # Try to extract from this URL
-                    result = extract_video_url(match)
-                    if result:
-                        return result
+                print(f"🔗 Found video hosting URL: {match}")
+                # Try to get direct video from hosting site
+                try:
+                    hosting_response = scraper.get(match, headers=headers, timeout=30)
+                    hosting_content = hosting_response.text
+                    
+                    # Look for direct video in hosting site
+                    direct_patterns = [
+                        r'src=["\']([^"\']+\.mp4(?:\?[^"\']*)?)["\']',
+                        r'<source[^>]+src=["\']([^"\']+)["\']',
+                        r'video[^>]+src=["\']([^"\']+)["\']',
+                        r'file["\']\s*:\s*["\']([^"\']+)["\']',
+                    ]
+                    
+                    for direct_pattern in direct_patterns:
+                        direct_matches = re.findall(direct_pattern, hosting_content, re.IGNORECASE)
+                        for direct_match in direct_matches:
+                            if direct_match and ('mp4' in direct_match or 'm3u8' in direct_match):
+                                video_url = direct_match if direct_match.startswith('http') else 'https:' + direct_match
+                                print(f"✅ Found direct video URL: {video_url[:80]}...")
+                                return video_url
+                except Exception as e:
+                    print(f"⚠️ Hosting site extraction error: {e}")
+        
+        # Method 3: Look for JSON configuration
+        print("🔍 Method 3: Looking for JSON configuration...")
+        json_patterns = [
+            r'window\.playerConfig\s*=\s*({[^}]+})',
+            r'var\s+config\s*=\s*({[^}]+})',
+            r'playerInstance\.setup\(({[^}]+})\)',
+            r'jwplayer\("[^"]+"\)\.setup\(({[^}]+})\)',
+            r'videojs\("[^"]+"\)\.src\(({[^}]+})\)',
+        ]
+        
+        for pattern in json_patterns:
+            matches = re.findall(pattern, content, re.DOTALL)
+            for match in matches:
+                try:
+                    # Clean JSON string
+                    json_str = match.replace('\\"', '"').replace('\\/', '/')
+                    config = json.loads(json_str)
+                    
+                    # Look for video sources in JSON
+                    sources = config.get('sources', [])
+                    if isinstance(sources, list):
+                        for source in sources:
+                            if isinstance(source, dict) and 'file' in source:
+                                video_url = source['file']
+                                if video_url and ('mp4' in video_url or 'm3u8' in video_url):
+                                    print(f"✅ Found video URL in JSON: {video_url[:80]}...")
+                                    return video_url
+                    
+                    # Check for file property
+                    if 'file' in config:
+                        video_url = config['file']
+                        if video_url and ('mp4' in video_url or 'm3u8' in video_url):
+                            print(f"✅ Found video URL in JSON file: {video_url[:80]}...")
+                            return video_url
+                except:
+                    pass
+        
+        # Method 4: Deep search for MP4/M3U8 URLs
+        print("🔍 Method 4: Deep search for MP4/M3U8 URLs...")
+        deep_patterns = [
+            r'https?://[^"\'\s<>]+\.mp4(?:\?[^"\'\s<>]*)?',
+            r'https?://[^"\'\s<>]+\.m3u8(?:\?[^"\'\s<>]*)?',
+            r'//[^"\'\s<>]+\.mp4(?:\?[^"\'\s<>]*)?',
+            r'//[^"\'\s<>]+\.m3u8(?:\?[^"\'\s<>]*)?',
+        ]
+        
+        for pattern in deep_patterns:
+            matches = re.findall(pattern, content)
+            for match in matches:
+                if match:
+                    video_url = match if match.startswith('http') else 'https:' + match
+                    print(f"🔍 Found potential video URL: {video_url[:80]}...")
+                    # Verify it's a valid video URL
+                    if any(ext in video_url.lower() for ext in ['.mp4', '.m3u8', '.webm']):
+                        print(f"✅ Accepting as video URL: {video_url[:80]}...")
+                        return video_url
+        
+        # Method 5: Try to extract from JavaScript variables
+        print("🔍 Method 5: Extracting from JavaScript variables...")
+        js_patterns = [
+            r'var\s+videoUrl\s*=\s*["\']([^"\']+)["\']',
+            r'videoUrl\s*=\s*["\']([^"\']+)["\']',
+            r'video_url\s*=\s*["\']([^"\']+)["\']',
+            r'fileUrl\s*=\s*["\']([^"\']+)["\']',
+            r'sourceUrl\s*=\s*["\']([^"\']+)["\']',
+        ]
+        
+        for pattern in js_patterns:
+            matches = re.findall(pattern, content)
+            for match in matches:
+                if match and ('mp4' in match or 'm3u8' in match):
+                    video_url = match if match.startswith('http') else 'https:' + match
+                    print(f"✅ Found video URL in JS variable: {video_url[:80]}...")
+                    return video_url
         
         print("❌ Could not extract video URL from vidspeed")
-        
-        # Try cloudscraper as last resort
-        print("🌐 Trying cloudscraper as last resort...")
-        result = extract_with_cloudscraper(url)
-        if result:
-            return result
-        
         return None
         
     except Exception as e:
-        print(f"⚠️ vidspeed extraction error: {e}")
+        print(f"⚠️ Vidspeed extraction error: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -664,21 +763,21 @@ def extract_video_url(url):
     """Extract direct video URL with multiple extraction methods"""
     print(f"🔍 Extracting from: {url}")
     
-    # Normalize VK URLs first
-    original_url = url
-    if 'vk.com' in url or 'vkontakte' in url:
-        url = normalize_vk_url(url)
-        print(f"🔧 Normalized VK URL: {url}")
-    
-    # Check for specific sites
+    # Check for specific sites first
     parsed_url = urlparse(url)
     
     # vidspeed.org specific extraction
     if 'vidspeed.org' in parsed_url.netloc:
-        print("🔄 Using vidspeed extractor...")
+        print("🔄 Using enhanced vidspeed extractor...")
         video_url = extract_vidspeed_video_url(url)
         if video_url:
             return video_url
+    
+    # Normalize VK URLs
+    original_url = url
+    if 'vk.com' in url or 'vkontakte' in url:
+        url = normalize_vk_url(url)
+        print(f"🔧 Normalized VK URL: {url}")
     
     # VK.com specific extraction
     if 'vk.com' in parsed_url.netloc or 'vkontakte' in parsed_url.netloc:
@@ -687,33 +786,30 @@ def extract_video_url(url):
         if video_url:
             return video_url
     
-    # Method 1: Try yt-dlp first (works for many sites)
+    # Method 1: Try yt-dlp first
     video_url = extract_with_ytdlp(url)
     if video_url:
         return video_url
     
-    # Method 2: Generic extraction for other sites
-    print("🔄 Trying generic extractor...")
-    video_url = extract_generic_video_url(url)
+    # Method 2: Try cloudscraper for Cloudflare sites
+    print("🔄 Trying cloudscraper...")
+    video_url = extract_with_cloudscraper(url)
     if video_url:
         return video_url
     
-    # Method 3: Try cloudscraper for Cloudflare sites
-    print("🔄 Trying cloudscraper...")
-    video_url = extract_with_cloudscraper(url)
+    # Method 3: Generic extraction
+    print("🔄 Trying generic extractor...")
+    video_url = extract_generic_video_url(url)
     if video_url:
         return video_url
     
     # Method 4: Fallback to direct yt-dlp download
     print("🔄 Fallback: Direct yt-dlp download attempt...")
     try:
-        # Create a temporary file to test download
         with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-            # Just check if we can get info
             info = ydl.extract_info(url, download=False)
             if info:
                 print(f"⚠️ Couldn't extract direct URL, but yt-dlp can access the video")
-                # Return the original URL for yt-dlp to handle
                 return url
     except:
         pass
