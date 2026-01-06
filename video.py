@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-VK Video Downloader - MPD Edition
-Extracts and downloads DASH MPD streams from VK
+VK Video Downloader - JavaScript Rendering Edition
+Uses requests-html to render JavaScript and get video URLs
 """
 
 import os
@@ -13,7 +13,6 @@ import requests
 import subprocess
 import shutil
 import asyncio
-import xml.etree.ElementTree as ET
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, unquote
 import random
@@ -52,7 +51,7 @@ if not validate_env():
 TELEGRAM_API_ID = int(TELEGRAM_API_ID)
 
 print("📦 Installing requirements...")
-requirements = ["pyrogram", "tgcrypto", "requests"]
+requirements = ["pyrogram", "tgcrypto", "requests", "requests-html", "beautifulsoup4"]
 for req in requirements:
     try:
         subprocess.check_call([sys.executable, "-m", "pip", "install", req, "--quiet"])
@@ -62,30 +61,22 @@ for req in requirements:
 
 from pyrogram import Client
 from pyrogram.errors import FloodWait
+from requests_html import HTMLSession
+from bs4 import BeautifulSoup
 
 app = None
 
-# Generate browser-like headers
-def generate_headers():
-    user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    ]
-    
-    return {
-        'User-Agent': random.choice(user_agents),
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Referer': 'https://vk.com/',
-        'Origin': 'https://vk.com/',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-site',
-    }
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Referer': 'https://vk.com/',
+    'Origin': 'https://vk.com/',
+}
 
 async def setup_telegram():
     """Setup Telegram client"""
@@ -94,7 +85,7 @@ async def setup_telegram():
     
     try:
         app = Client(
-            "vk_mpd_downloader",
+            "vk_js",
             api_id=TELEGRAM_API_ID,
             api_hash=TELEGRAM_API_HASH,
             session_string=STRING_SESSION.strip(),
@@ -120,439 +111,240 @@ async def setup_telegram():
         print(f"❌ Telegram setup failed: {e}")
         return False
 
-def extract_mpd_url_from_page(url):
-    """Extract MPD URL from VK page with network simulation"""
-    print("🎯 Extracting MPD URL from VK page...")
+def extract_vk_video_with_js(url):
+    """Extract VK video using JavaScript rendering"""
+    print("🎯 Using JavaScript rendering for VK...")
     
     try:
+        # Create HTML session with JavaScript support
+        session = HTMLSession()
+        
+        # Load the page with JavaScript rendering
+        print("🔄 Rendering VK page with JavaScript...")
+        response = session.get(url, headers=HEADERS, timeout=30)
+        
+        # Render JavaScript (this will execute JS on the page)
+        response.html.render(timeout=30, sleep=3)
+        
+        # Get the rendered HTML
+        html = response.html.html
+        print(f"✅ Page rendered successfully ({len(html)} characters)")
+        
+        # Save rendered HTML for debugging
+        with open("debug_rendered.html", "w", encoding="utf-8") as f:
+            f.write(html)
+        print("📝 Saved rendered HTML to debug_rendered.html")
+        
+        # Parse with BeautifulSoup
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Method 1: Look for video element
+        print("🔍 Searching for video elements...")
+        video_elements = soup.find_all('video')
+        for i, video in enumerate(video_elements):
+            print(f"📺 Found video element #{i+1}")
+            if video.get('src'):
+                video_url = video['src']
+                if video_url.startswith('//'):
+                    video_url = 'https:' + video_url
+                print(f"✅ Found video source: {video_url[:100]}...")
+                return video_url
+        
+        # Method 2: Look for source tags inside video
+        source_tags = soup.find_all('source')
+        for i, source in enumerate(source_tags):
+            src = source.get('src')
+            if src and ('mp4' in src or 'm3u8' in src):
+                video_url = src
+                if video_url.startswith('//'):
+                    video_url = 'https:' + video_url
+                print(f"✅ Found source tag: {video_url[:100]}...")
+                return video_url
+        
+        # Method 3: Look for iframe embeds
+        print("🔍 Searching for iframe embeds...")
+        iframe_tags = soup.find_all('iframe')
+        for i, iframe in enumerate(iframe_tags):
+            src = iframe.get('src')
+            if src and 'video' in src:
+                print(f"📺 Found iframe #{i+1}: {src[:100]}...")
+                
+                try:
+                    # Try to extract from iframe
+                    iframe_response = session.get(src, headers=HEADERS, timeout=20)
+                    iframe_response.html.render(timeout=20, sleep=2)
+                    iframe_html = iframe_response.html.html
+                    
+                    # Look for video in iframe
+                    iframe_soup = BeautifulSoup(iframe_html, 'html.parser')
+                    iframe_videos = iframe_soup.find_all('video')
+                    for iframe_video in iframe_videos:
+                        if iframe_video.get('src'):
+                            video_url = iframe_video['src']
+                            if video_url.startswith('//'):
+                                video_url = 'https:' + video_url
+                            print(f"✅ Found video in iframe: {video_url[:100]}...")
+                            return video_url
+                except:
+                    continue
+        
+        # Method 4: Search for common VK video patterns in rendered content
+        print("🔍 Searching for VK video patterns...")
+        
+        patterns = [
+            r'"url(?:240|360|480|720|1080)?"\s*:\s*"([^"]+)"',
+            r'"hls"\s*:\s*"([^"]+)"',
+            r'"mp4(?:_src)?"\s*:\s*"([^"]+)"',
+            r'file\s*:\s*"([^"]+)"',
+            r'src\s*:\s*"([^"]+)"',
+            r'https?://vkvd[0-9]+\.okcdn\.ru/[^"\']+',
+            r'https?://[^"\']+\.m3u8[^"\']*',
+            r'https?://[^"\']+\.mp4[^"\']*',
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, html)
+            for match in matches:
+                if match and 'http' in match:
+                    video_url = match.replace('\\/', '/')
+                    print(f"✅ Found pattern match: {video_url[:100]}...")
+                    return video_url
+        
+        print("❌ No video URL found in rendered content")
+        return None
+        
+    except Exception as e:
+        print(f"❌ JavaScript rendering error: {e}")
+        return None
+
+def extract_vk_video_bypass(url):
+    """Alternative method: Try to bypass VK protection"""
+    print("🎯 Trying bypass method...")
+    
+    try:
+        # Try mobile user agent
+        mobile_headers = HEADERS.copy()
+        mobile_headers['User-Agent'] = 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'
+        
         session = requests.Session()
-        headers = generate_headers()
+        response = session.get(url, headers=mobile_headers, timeout=30)
         
-        # First, get the page
-        print("🔄 Loading VK video page...")
-        response = session.get(url, headers=headers, timeout=30)
-        
-        if response.status_code != 200:
-            print(f"❌ Failed to load page: {response.status_code}")
-            return None
-        
+        # Look for video URLs
         html = response.text
         
-        # Look for MPD URL patterns (from your network log)
-        print("🔍 Searching for MPD URLs...")
-        
-        # Pattern 1: Direct MPD URLs
-        mpd_patterns = [
-            r'https?://vkvd[0-9]+\.okcdn\.ru/[^"\']+\.mpd[^"\']*',
-            r'https?://[^"\']+okcdn\.ru/[^"\']+\.mpd[^"\']*',
-            r'ondemand/[^"\']+\.mpd',
-        ]
-        
-        for pattern in mpd_patterns:
-            matches = re.findall(pattern, html)
-            for match in matches:
-                if not match.startswith('http'):
-                    # Make it a full URL
-                    if 'okcdn.ru' in match:
-                        match = f"https://vkvd1.okcdn.ru/{match}" if match.startswith('/') else f"https://{match}"
-                    else:
-                        # Try to construct from context
-                        base_match = re.search(r'(https?://[^/]+)/', html)
-                        if base_match:
-                            base = base_match.group(1)
-                            match = f"{base}/{match}" if match.startswith('/') else f"{base}/ondemand/{match}"
+        # Try to find JSON data
+        json_pattern = r'var\s+playerParams\s*=\s*({[^;]+});'
+        match = re.search(json_pattern, html)
+        if match:
+            try:
+                json_str = match.group(1)
+                # Clean JSON
+                json_str = json_str.replace('\\/', '/').replace('\\"', '"')
+                data = json.loads(json_str)
                 
-                print(f"✅ Found MPD URL: {match[:100]}...")
-                return match
-        
-        # Pattern 2: Look for initialization segments that might lead to MPD
-        print("🔄 Searching for video segments...")
-        segment_patterns = [
-            r'https?://[^"\']+\.m4s[^"\']*',
-            r'https?://[^"\']+track\.(?:v|a)\.m4s[^"\']*',
-            r'ondemand/[^"\']+\.m4s',
-        ]
-        
-        for pattern in segment_patterns:
-            matches = re.findall(pattern, html)
-            for match in matches:
-                if not match.startswith('http'):
-                    match = f"https://vkvd1.okcdn.ru/{match}" if match.startswith('/') else f"https://{match}"
+                # Look for video URLs in JSON
+                if 'hls' in data:
+                    video_url = data['hls']
+                    print(f"✅ Found hls in JSON: {video_url[:100]}...")
+                    return video_url
                 
-                # Try to derive MPD URL from segment URL
-                if '.m4s' in match:
-                    # Extract base path
-                    parsed = urlparse(match)
-                    path_parts = parsed.path.split('/')
-                    
-                    # Look for pattern like dash4_xxxxx.mpd
-                    for i, part in enumerate(path_parts):
-                        if part.startswith('dash4_') and '.mpd' in part:
-                            # Construct MPD URL
-                            mpd_path = '/'.join(path_parts[:i+1])
-                            mpd_url = f"{parsed.scheme}://{parsed.netloc}{mpd_path}"
-                            print(f"✅ Derived MPD URL from segment: {mpd_url[:100]}...")
-                            return mpd_url
+                # Check for mp4 URLs
+                for key in ['url240', 'url360', 'url480', 'url720', 'url1080', 'url']:
+                    if key in data and data[key]:
+                        video_url = data[key]
+                        print(f"✅ Found {key} in JSON: {video_url[:100]}...")
+                        return video_url
+                        
+            except:
+                pass
         
-        # Pattern 3: Look for JSON data containing MPD info
-        print("🔄 Searching for JSON data...")
-        json_patterns = [
-            r'<script[^>]*>([^<]+video[^<]+)</script>',
-            r'videoData\s*=\s*({[^;]+});',
-            r'playerConfig\s*=\s*({[^}]+})',
-        ]
+        # Try alternative mobile API
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+        oid = query.get('oid', [''])[0]
+        vid = query.get('id', [''])[0]
         
-        for pattern in json_patterns:
-            matches = re.findall(pattern, html, re.DOTALL)
-            for match in matches:
-                if 'mpd' in match.lower() or 'dash' in match.lower():
-                    # Try to extract URL
-                    url_match = re.search(r'https?://[^"\'\s]+\.mpd[^"\'\s]*', match)
-                    if url_match:
-                        print(f"✅ Found MPD in JSON: {url_match.group(0)[:100]}...")
-                        return url_match.group(0)
+        if oid and vid:
+            mobile_api_url = f"https://vk.com/al_video.php?act=show&al=1&video={oid}_{vid}"
+            mobile_response = session.get(mobile_api_url, headers=mobile_headers, timeout=30)
+            
+            # Look for video in API response
+            api_html = mobile_response.text
+            
+            patterns = [
+                r'"url\d+"\s*:\s*"([^"]+)"',
+                r'"hls"\s*:\s*"([^"]+)"',
+                r'https?://[^"\']+\.mp4[^"\']*',
+                r'https?://[^"\']+\.m3u8[^"\']*',
+            ]
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, api_html)
+                for match in matches:
+                    if match and 'http' in match:
+                        video_url = match.replace('\\/', '/')
+                        print(f"✅ Found in mobile API: {video_url[:100]}...")
+                        return video_url
         
-        print("❌ No MPD URL found")
         return None
         
     except Exception as e:
-        print(f"❌ Extraction error: {e}")
+        print(f"❌ Bypass error: {e}")
         return None
 
-def parse_mpd_for_lowest_quality(mpd_url):
-    """Parse MPD file to find lowest quality video (around 240p)"""
-    print("📊 Parsing MPD for lowest quality...")
+def download_video(video_url, output_path):
+    """Download video with proper headers"""
+    print("📥 Downloading video...")
     
     try:
         session = requests.Session()
-        headers = generate_headers()
+        headers = HEADERS.copy()
         
-        # Download MPD file
-        print(f"📥 Downloading MPD file...")
-        response = session.get(mpd_url, headers=headers, timeout=30)
+        # Set referer for VK
+        if 'okcdn.ru' in video_url or 'vk.com' in video_url:
+            headers['Referer'] = 'https://vk.com/'
+        
+        print(f"🔗 Downloading: {video_url[:150]}...")
+        
+        response = session.get(video_url, headers=headers, stream=True, timeout=60)
         
         if response.status_code != 200:
-            print(f"❌ Failed to download MPD: {response.status_code}")
-            return None, None
-        
-        mpd_content = response.text
-        
-        # Parse XML
-        try:
-            root = ET.fromstring(mpd_content)
-        except:
-            # Try to clean the XML
-            mpd_content_clean = mpd_content.split('<?xml', 1)[-1] if '<?xml' in mpd_content else mpd_content
-            try:
-                root = ET.fromstring(f'<?xml version="1.0"?>{mpd_content_clean}')
-            except:
-                print("❌ Failed to parse MPD XML")
-                return None, None
-        
-        # Namespace handling
-        ns = {'mpd': 'urn:mpeg:dash:schema:mpd:2011'}
-        
-        # Find AdaptationSets for video and audio
-        video_urls = []
-        audio_urls = []
-        
-        for adaptation_set in root.findall('.//mpd:AdaptationSet', ns):
-            mime_type_elem = adaptation_set.find('mpd:Representation/mpd:BaseURL', ns)
-            if mime_type_elem is None:
-                mime_type_elem = adaptation_set.find('mpd:BaseURL', ns)
-            
-            if mime_type_elem is not None:
-                content_type = adaptation_set.get('contentType', '')
-                mime_type = adaptation_set.get('mimeType', '')
-                
-                # Get bandwidth/quality info
-                representation = adaptation_set.find('mpd:Representation', ns)
-                bandwidth = representation.get('bandwidth', '0') if representation is not None else '0'
-                width = representation.get('width', '0') if representation is not None else '0'
-                height = representation.get('height', '0') if representation is not None else '0'
-                
-                base_url = mime_type_elem.text.strip()
-                if not base_url.startswith('http'):
-                    # Construct full URL
-                    parsed_mpd = urlparse(mpd_url)
-                    base_url = f"{parsed_mpd.scheme}://{parsed_mpd.netloc}{base_url}"
-                
-                # Categorize by type
-                if 'video' in content_type.lower() or 'video' in mime_type.lower():
-                    video_urls.append({
-                        'url': base_url,
-                        'bandwidth': int(bandwidth),
-                        'width': int(width) if width.isdigit() else 0,
-                        'height': int(height) if height.isdigit() else 0
-                    })
-                elif 'audio' in content_type.lower() or 'audio' in mime_type.lower():
-                    audio_urls.append({
-                        'url': base_url,
-                        'bandwidth': int(bandwidth)
-                    })
-        
-        # If we couldn't parse properly, try regex approach
-        if not video_urls:
-            print("🔄 Using regex fallback for MPD parsing...")
-            
-            # Look for video segments
-            video_segments = re.findall(r'https?://[^\s"\']+\.(?:v\.m4s|video\d+\.m4s)[^\s"\']*', mpd_content)
-            audio_segments = re.findall(r'https?://[^\s"\']+\.(?:a\.m4s|audio\d+\.m4s)[^\s"\']*', mpd_content)
-            
-            if video_segments:
-                # Use first video segment and try to find pattern
-                first_video = video_segments[0]
-                # Extract base pattern
-                if 'track.v.m4s' in first_video:
-                    base_url = first_video.replace('track.v.m4s', '')
-                    video_urls.append({'url': base_url + 'track.v.m4s', 'bandwidth': 100000, 'height': 240})
-                else:
-                    video_urls.append({'url': first_video, 'bandwidth': 100000, 'height': 240})
-            
-            if audio_segments:
-                first_audio = audio_segments[0]
-                if 'track.a.m4s' in first_audio:
-                    base_url = first_audio.replace('track.a.m4s', '')
-                    audio_urls.append({'url': base_url + 'track.a.m4s', 'bandwidth': 64000})
-                else:
-                    audio_urls.append({'url': first_audio, 'bandwidth': 64000})
-        
-        # Sort video URLs by height (lowest first)
-        video_urls.sort(key=lambda x: x['height'])
-        
-        print(f"📊 Found {len(video_urls)} video quality options")
-        for v in video_urls:
-            print(f"  • {v['height']}p ({v['bandwidth']//1000}Kbps)")
-        
-        print(f"📊 Found {len(audio_urls)} audio options")
-        
-        if video_urls and audio_urls:
-            # Select lowest video quality (closest to 240p)
-            selected_video = None
-            target_height = 240
-            
-            # First try to find exact 240p
-            for v in video_urls:
-                if v['height'] == target_height:
-                    selected_video = v
-                    break
-            
-            # If not found, find closest
-            if not selected_video:
-                # Find lowest quality above 144p
-                for v in video_urls:
-                    if v['height'] >= 144:
-                        selected_video = v
-                        break
-            
-            if not selected_video:
-                selected_video = video_urls[0]  # Fallback
-            
-            selected_audio = audio_urls[0]  # Usually only one audio track
-            
-            print(f"✅ Selected video: {selected_video['height']}p")
-            print(f"✅ Selected audio")
-            
-            return selected_video['url'], selected_audio['url']
-        
-        print("❌ No video/audio tracks found in MPD")
-        return None, None
-        
-    except Exception as e:
-        print(f"❌ MPD parsing error: {e}")
-        return None, None
-
-def download_dash_segments(base_video_url, base_audio_url, output_path):
-    """Download DASH video and audio segments and combine them"""
-    print("🎬 Downloading DASH segments...")
-    
-    try:
-        session = requests.Session()
-        headers = generate_headers()
-        
-        # Create temp directory
-        temp_dir = "dash_temp"
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        # Download video segments (s0 to sN)
-        video_segments = []
-        audio_segments = []
-        
-        print("📥 Downloading video segments...")
-        for i in range(0, 100):  # Try up to 100 segments
-            segment_url = base_video_url.replace('track.v.m4s', f's{i}.v.m4s')
-            
-            try:
-                response = session.head(segment_url, headers=headers, timeout=5)
-                if response.status_code != 200:
-                    # Try alternative pattern
-                    segment_url = base_video_url.replace('track.v.m4s', f'video{i}.m4s')
-                    response = session.head(segment_url, headers=headers, timeout=5)
-                    if response.status_code != 200:
-                        break  # No more segments
-                
-                # Download segment
-                segment_file = os.path.join(temp_dir, f'video_{i:04d}.m4s')
-                print(f"  📥 Segment {i}...")
-                
-                seg_response = session.get(segment_url, headers=headers, timeout=30, stream=True)
-                with open(segment_file, 'wb') as f:
-                    for chunk in seg_response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                
-                video_segments.append(segment_file)
-                
-            except Exception as e:
-                print(f"⚠️ Failed segment {i}: {e}")
-                break
-        
-        if not video_segments:
-            print("❌ No video segments downloaded")
-            # Try to download the init segment
-            init_url = base_video_url
-            init_file = os.path.join(temp_dir, 'video_init.m4s')
-            try:
-                response = session.get(init_url, headers=headers, timeout=30)
-                with open(init_file, 'wb') as f:
-                    f.write(response.content)
-                video_segments.append(init_file)
-            except:
-                pass
-        
-        # Download audio segments
-        print("📥 Downloading audio segments...")
-        for i in range(0, 100):
-            segment_url = base_audio_url.replace('track.a.m4s', f's{i}.a.m4s')
-            
-            try:
-                response = session.head(segment_url, headers=headers, timeout=5)
-                if response.status_code != 200:
-                    # Try alternative pattern
-                    segment_url = base_audio_url.replace('track.a.m4s', f'audio{i}.m4s')
-                    response = session.head(segment_url, headers=headers, timeout=5)
-                    if response.status_code != 200:
-                        break
-                
-                segment_file = os.path.join(temp_dir, f'audio_{i:04d}.m4s')
-                print(f"  📥 Audio segment {i}...")
-                
-                seg_response = session.get(segment_url, headers=headers, timeout=30, stream=True)
-                with open(segment_file, 'wb') as f:
-                    for chunk in seg_response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                
-                audio_segments.append(segment_file)
-                
-            except Exception as e:
-                print(f"⚠️ Failed audio segment {i}: {e}")
-                break
-        
-        if not audio_segments:
-            print("❌ No audio segments downloaded")
-            # Try to download the init segment
-            init_url = base_audio_url
-            init_file = os.path.join(temp_dir, 'audio_init.m4s')
-            try:
-                response = session.get(init_url, headers=headers, timeout=30)
-                with open(init_file, 'wb') as f:
-                    f.write(response.content)
-                audio_segments.append(init_file)
-            except:
-                pass
-        
-        if not video_segments:
-            print("❌ No content downloaded")
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            print(f"❌ Download failed: {response.status_code}")
             return False
         
-        # Combine video segments
-        print("🔗 Combining video segments...")
-        video_list_file = os.path.join(temp_dir, 'video_list.txt')
-        with open(video_list_file, 'w') as f:
-            for seg in video_segments:
-                f.write(f"file '{os.path.basename(seg)}'\n")
+        total_size = int(response.headers.get('content-length', 0))
         
-        video_combined = os.path.join(temp_dir, 'video_combined.mp4')
-        cmd_video = [
-            'ffmpeg',
-            '-f', 'concat',
-            '-safe', '0',
-            '-i', video_list_file,
-            '-c', 'copy',
-            '-y',
-            video_combined
-        ]
+        if total_size > 0:
+            print(f"📊 File size: {total_size / (1024*1024):.1f} MB")
         
-        result = subprocess.run(cmd_video, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            print(f"❌ Failed to combine video: {result.stderr[:200]}")
-        
-        # Combine audio segments if available
-        audio_combined = None
-        if audio_segments:
-            print("🔗 Combining audio segments...")
-            audio_list_file = os.path.join(temp_dir, 'audio_list.txt')
-            with open(audio_list_file, 'w') as f:
-                for seg in audio_segments:
-                    f.write(f"file '{os.path.basename(seg)}'\n")
+        with open(output_path, 'wb') as f:
+            downloaded = 0
+            start_time = time.time()
             
-            audio_combined = os.path.join(temp_dir, 'audio_combined.mp4')
-            cmd_audio = [
-                'ffmpeg',
-                '-f', 'concat',
-                '-safe', '0',
-                '-i', audio_list_file,
-                '-c', 'copy',
-                '-y',
-                audio_combined
-            ]
-            
-            result = subprocess.run(cmd_audio, capture_output=True, text=True, timeout=300)
-            if result.returncode != 0:
-                print(f"⚠️ Failed to combine audio: {result.stderr[:200]}")
-                audio_combined = None
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    
+                    # Show progress every 2MB
+                    if downloaded % (2 * 1024 * 1024) < 8192 and total_size > 0:
+                        elapsed = time.time() - start_time
+                        speed = downloaded / elapsed / 1024 if elapsed > 0 else 0
+                        percent = (downloaded / total_size) * 100
+                        print(f"📥 {percent:.1f}% - {downloaded / (1024*1024):.1f} MB - {speed:.0f} KB/s")
         
-        # Merge video and audio
-        print("🎵 Merging video and audio...")
-        if audio_combined and os.path.exists(audio_combined):
-            cmd_merge = [
-                'ffmpeg',
-                '-i', video_combined,
-                '-i', audio_combined,
-                '-c', 'copy',
-                '-y',
-                output_path
-            ]
-        else:
-            # Just copy video if no audio
-            cmd_merge = [
-                'ffmpeg',
-                '-i', video_combined,
-                '-c', 'copy',
-                '-y',
-                output_path
-            ]
+        elapsed = time.time() - start_time
+        final_size = os.path.getsize(output_path) / (1024 * 1024)
         
-        result = subprocess.run(cmd_merge, capture_output=True, text=True, timeout=300)
-        
-        # Cleanup
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        
-        if result.returncode == 0 and os.path.exists(output_path):
-            file_size = os.path.getsize(output_path) / (1024 * 1024)
-            print(f"✅ DASH download complete: {file_size:.1f} MB")
+        if final_size > 0.5:  # At least 500KB
+            print(f"✅ Download complete: {final_size:.1f} MB in {elapsed:.1f}s")
             return True
         else:
-            print(f"❌ Failed to merge: {result.stderr[:200]}")
+            print(f"❌ File too small: {final_size:.1f} MB")
             return False
-        
+            
     except Exception as e:
-        print(f"❌ DASH download error: {e}")
-        # Cleanup on error
-        if 'temp_dir' in locals():
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        print(f"❌ Download error: {e}")
         return False
 
 def compress_to_240p(input_path, output_path):
@@ -565,7 +357,7 @@ def compress_to_240p(input_path, output_path):
     input_size = os.path.getsize(input_path) / (1024 * 1024)
     print(f"📊 Input size: {input_size:.1f} MB")
     
-    # Check current quality
+    # Check if already low quality
     try:
         cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
                '-show_entries', 'stream=height', '-of', 'csv=p=0:nk=1', input_path]
@@ -673,46 +465,39 @@ async def upload_to_telegram(file_path, caption):
         return False
 
 async def process_vk_video(url, title):
-    """Process VK video using DASH MPD"""
+    """Process VK video with multiple extraction methods"""
     print(f"\n{'='*60}")
     print(f"🎬 Processing: {title}")
     print(f"🔗 URL: {url}")
     print(f"{'='*60}")
     
     timestamp = datetime.now().strftime('%H%M%S')
-    temp_dir = f"vk_dash_{timestamp}"
+    temp_dir = f"vk_{timestamp}"
     os.makedirs(temp_dir, exist_ok=True)
     
     temp_file = os.path.join(temp_dir, "video.mp4")
     final_file = os.path.join(temp_dir, "video_240p.mp4")
     
     try:
-        # Step 1: Extract MPD URL
-        print("1️⃣ Extracting MPD URL...")
-        mpd_url = extract_mpd_url_from_page(url)
+        # Step 1: Try JavaScript rendering first
+        print("1️⃣ Extracting with JavaScript rendering...")
+        video_url = extract_vk_video_with_js(url)
         
-        if not mpd_url:
-            print("❌ Failed to extract MPD URL")
-            return False, "MPD extraction failed"
+        # Step 2: If that fails, try bypass method
+        if not video_url:
+            print("2️⃣ Trying bypass method...")
+            video_url = extract_vk_video_bypass(url)
         
-        print(f"✅ MPD URL: {mpd_url[:150]}...")
+        if not video_url:
+            print("❌ Failed to extract video URL")
+            return False, "Extraction failed"
         
-        # Step 2: Parse MPD for video/audio URLs
-        print("2️⃣ Parsing MPD for segments...")
-        video_base_url, audio_base_url = parse_mpd_for_lowest_quality(mpd_url)
+        print(f"✅ Extracted URL: {video_url[:150]}...")
         
-        if not video_base_url:
-            print("❌ Failed to parse MPD")
-            return False, "MPD parsing failed"
-        
-        print(f"✅ Video base URL: {video_base_url[:100]}...")
-        if audio_base_url:
-            print(f"✅ Audio base URL: {audio_base_url[:100]}...")
-        
-        # Step 3: Download DASH segments
-        print("3️⃣ Downloading DASH segments...")
-        if not download_dash_segments(video_base_url, audio_base_url, temp_file):
-            return False, "DASH download failed"
+        # Step 3: Download
+        print("3️⃣ Downloading video...")
+        if not download_video(video_url, temp_file):
+            return False, "Download failed"
         
         # Check file
         if not os.path.exists(temp_file) or os.path.getsize(temp_file) < 1024:
@@ -750,9 +535,9 @@ async def process_vk_video(url, title):
 async def main():
     """Main function"""
     print("="*60)
-    print("🎬 VK DASH Downloader v5.0")
-    print("📊 Uses MPD (DASH) streaming protocol")
-    print("🎯 Extracts and combines video/audio segments")
+    print("🎬 VK JavaScript Downloader v6.0")
+    print("🌐 Uses JavaScript rendering to bypass VK protection")
+    print("🔍 Multiple extraction methods with fallbacks")
     print("="*60)
     
     # Check ffmpeg
@@ -808,8 +593,8 @@ async def main():
             print(f"❌ {message}")
         
         if index < len(videos):
-            print("⏳ Waiting 5 seconds...")
-            await asyncio.sleep(5)
+            print("⏳ Waiting 10 seconds...")
+            await asyncio.sleep(10)
     
     # Summary
     print(f"\n{'='*60}")
