@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-VK Video Downloader - Ultimate Version
-Uses browser-like requests with full headers simulation
+VK Video Downloader - Fixed URL Filtering
+Filters out tracking URLs and focuses on real video URLs
 """
 
 import os
@@ -70,28 +70,16 @@ def generate_headers():
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    ]
-    
-    accept_languages = [
-        'en-US,en;q=0.9',
-        'ar,en-US;q=0.9,en;q=0.8',
-        'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
     ]
     
     return {
         'User-Agent': random.choice(user_agents),
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': random.choice(accept_languages),
+        'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
         'Accept-Encoding': 'gzip, deflate, br',
         'DNT': '1',
         'Connection': 'keep-alive',
         'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0',
         'Referer': 'https://vk.com/',
         'Origin': 'https://vk.com/',
     }
@@ -103,7 +91,7 @@ async def setup_telegram():
     
     try:
         app = Client(
-            "vk_ultimate",
+            "vk_fixed",
             api_id=TELEGRAM_API_ID,
             api_hash=TELEGRAM_API_HASH,
             session_string=STRING_SESSION.strip(),
@@ -129,9 +117,56 @@ async def setup_telegram():
         print(f"❌ Telegram setup failed: {e}")
         return False
 
-def extract_vk_video_direct(url):
-    """Direct extraction from VK using multiple techniques"""
-    print("🎯 Direct VK video extraction...")
+def is_video_url(url):
+    """Check if URL is a real video URL (not tracking)"""
+    if not url or 'http' not in url:
+        return False
+    
+    # List of tracking/analytics patterns to EXCLUDE
+    tracking_patterns = [
+        'video_mediascope',
+        'mediascope',
+        'analytics',
+        'tracking',
+        'event_name=',
+        'statistics',
+        'metrics',
+        'beacon',
+        'pixel',
+        'log',
+    ]
+    
+    # List of video patterns to INCLUDE
+    video_patterns = [
+        '.mp4',
+        '.m3u8',
+        '.ts',
+        'okcdn.ru',
+        'vkvd',
+        '1vid.online',
+        'cdnz.quest',
+        '/video/',
+        'video.m3u8',
+        'index.m3u8',
+        'hls',
+        'stream',
+    ]
+    
+    # Exclude tracking URLs
+    for pattern in tracking_patterns:
+        if pattern in url.lower():
+            return False
+    
+    # Include video URLs
+    for pattern in video_patterns:
+        if pattern in url.lower():
+            return True
+    
+    return False
+
+def extract_vk_video_smart(url):
+    """Smart extraction focusing on real video URLs"""
+    print("🎯 Smart VK video extraction...")
     
     try:
         # Parse video ID
@@ -154,11 +189,11 @@ def extract_vk_video_direct(url):
         video_id = f"{oid}_{vid}"
         print(f"📊 Video ID: {video_id}")
         
-        # Method 1: Try to get the page with session
+        # Method 1: Try with browser-like session
         session = requests.Session()
         headers = generate_headers()
         
-        print("🔄 Method 1: Direct page request...")
+        print("🔄 Loading VK page...")
         response = session.get(url, headers=headers, timeout=30)
         
         if response.status_code != 200:
@@ -167,251 +202,187 @@ def extract_vk_video_direct(url):
         
         html = response.text
         
-        # Look for video URLs in the page
-        video_patterns = [
-            r'"url(?:240|360|480|720|1080)?"\s*:\s*"([^"]+)"',
-            r'"mp4(?:_src)?"\s*:\s*"([^"]+)"',
-            r'file\s*:\s*"([^"]+)"',
-            r'src\s*:\s*"([^"]+)"',
-            r'"hls"\s*:\s*"([^"]+)"',
-            r'videoSrc\s*:\s*"([^"]+)"',
-            r'https?://[^"\']+\.mp4[^"\']*',
-            r'https?://[^"\']+\.m3u8[^"\']*',
-        ]
+        # Try to find JSON data with video info
+        print("🔍 Searching for video data in JSON...")
         
-        for pattern in video_patterns:
-            matches = re.findall(pattern, html)
-            for match in matches:
-                if match and 'http' in match:
-                    video_url = match.replace('\\/', '/')
-                    print(f"✅ Found video URL: {video_url[:100]}...")
-                    
-                    # If it's m3u8, try to get actual video segments
-                    if '.m3u8' in video_url:
-                        print("🔍 Processing m3u8 playlist...")
-                        m3u8_content = download_m3u8_content(video_url, headers)
-                        if m3u8_content:
-                            # Look for actual video segments
-                            segment_match = re.search(r'https?://[^\s]+\.(mp4|ts|m4s)', m3u8_content)
-                            if segment_match:
-                                return segment_match.group(0)
-                    
-                    return video_url
-        
-        # Method 2: Try to find in script tags
-        print("🔄 Method 2: Script tag search...")
-        script_patterns = [
-            r'<script[^>]*>([^<]+)</script>',
+        # Look for common JSON patterns in VK
+        json_patterns = [
+            r'var\s+playerParams\s*=\s*({[^;]+});',
+            r'videoPlayerInit\s*\(\s*({[^}]+})',
             r'window\.videoData\s*=\s*({[^;]+});',
+            r'"videoData"\s*:\s*({[^}]+})',
+            r'<script[^>]*data-video="([^"]+)"',
         ]
         
-        for pattern in script_patterns:
+        for pattern in json_patterns:
             matches = re.findall(pattern, html, re.DOTALL)
             for match in matches:
-                if 'mp4' in match or 'm3u8' in match:
-                    # Try to extract URL from script
-                    url_match = re.search(r'https?://[^"\'\s]+\.(mp4|m3u8)[^"\'\s]*', match)
-                    if url_match:
-                        video_url = url_match.group(0)
-                        print(f"✅ Found in script: {video_url[:100]}...")
-                        return video_url
+                try:
+                    # Clean the JSON string
+                    json_str = match.replace('\\/', '/').replace('\\"', '"')
+                    if json_str.startswith('{'):
+                        data = json.loads(json_str)
+                        
+                        # Search for video URLs in the JSON
+                        def search_video_urls(obj, path=""):
+                            urls = []
+                            if isinstance(obj, dict):
+                                for key, value in obj.items():
+                                    if isinstance(value, str) and is_video_url(value):
+                                        urls.append(value)
+                                    elif isinstance(value, (dict, list)):
+                                        urls.extend(search_video_urls(value, f"{path}.{key}"))
+                            elif isinstance(obj, list):
+                                for i, item in enumerate(obj):
+                                    urls.extend(search_video_urls(item, f"{path}[{i}]"))
+                            return urls
+                        
+                        found_urls = search_video_urls(data)
+                        if found_urls:
+                            print(f"✅ Found {len(found_urls)} video URLs in JSON")
+                            for found_url in found_urls:
+                                print(f"  • {found_url[:80]}...")
+                            return found_urls[0]  # Return first valid video URL
+                            
+                except json.JSONDecodeError:
+                    # If not JSON, check if it's a direct URL
+                    if is_video_url(match):
+                        print(f"✅ Found direct URL: {match[:80]}...")
+                        return match
+                except Exception as e:
+                    continue
         
-        # Method 3: Try iframe approach
-        print("🔄 Method 3: Iframe detection...")
-        iframe_match = re.search(r'iframe[^>]+src="([^"]+)"', html)
-        if iframe_match:
-            iframe_url = iframe_match.group(1)
-            if iframe_url.startswith('//'):
-                iframe_url = 'https:' + iframe_url
-            
-            print(f"📺 Found iframe: {iframe_url}")
-            try:
-                iframe_response = session.get(iframe_url, headers=headers, timeout=20)
-                iframe_html = iframe_response.text
-                
-                # Search for video in iframe
-                for pattern in video_patterns:
-                    iframe_matches = re.findall(pattern, iframe_html)
-                    for iframe_match in iframe_matches:
-                        if iframe_match and 'http' in iframe_match:
-                            video_url = iframe_match.replace('\\/', '/')
-                            print(f"✅ Found in iframe: {video_url[:100]}...")
-                            return video_url
-            except:
-                pass
+        # Method 2: Look for specific VK video patterns
+        print("🔄 Searching for VK-specific patterns...")
         
-        print("❌ Could not extract video URL")
+        vk_video_patterns = [
+            r'"url\d+"\s*:\s*"([^"]+)"',
+            r'"hls"\s*:\s*"([^"]+)"',
+            r'"mp4_src"\s*:\s*"([^"]+)"',
+            r'"file"\s*:\s*"([^"]+)"',
+            r'src\s*:\s*"([^"]+)"',
+        ]
+        
+        for pattern in vk_video_patterns:
+            matches = re.findall(pattern, html)
+            for match in matches:
+                if is_video_url(match):
+                    video_url = match.replace('\\/', '/')
+                    print(f"✅ Found VK video URL: {video_url[:80]}...")
+                    return video_url
+        
+        # Method 3: Look for common video hosting domains
+        print("🔄 Searching for video hosting domains...")
+        
+        video_hosting_patterns = [
+            r'https?://[^"\']+\.okcdn\.ru/[^"\']+',
+            r'https?://vkvd[0-9]+\.okcdn\.ru/[^"\']+',
+            r'https?://[^"\']+\.1vid\.online/[^"\']+',
+            r'https?://[^"\']+\.cdnz\.quest/[^"\']+',
+        ]
+        
+        for pattern in video_hosting_patterns:
+            matches = re.findall(pattern, html)
+            for match in matches:
+                if is_video_url(match):
+                    print(f"✅ Found video hosting URL: {match[:80]}...")
+                    return match
+        
+        # Method 4: Try to find m3u8 URLs
+        print("🔄 Searching for m3u8 URLs...")
+        m3u8_patterns = [
+            r'https?://[^"\']+\.m3u8[^"\']*',
+            r'\.m3u8\?[^"\']*',
+        ]
+        
+        for pattern in m3u8_patterns:
+            matches = re.findall(pattern, html)
+            for match in matches:
+                if is_video_url(match):
+                    print(f"✅ Found m3u8 URL: {match[:80]}...")
+                    return match
+        
+        print("❌ No valid video URLs found")
         return None
         
     except Exception as e:
         print(f"❌ Extraction error: {e}")
         return None
 
-def download_m3u8_content(m3u8_url, headers):
-    """Download and parse m3u8 content"""
-    try:
-        session = requests.Session()
-        response = session.get(m3u8_url, headers=headers, timeout=20)
+def download_video_with_retry(video_url, output_path, max_retries=3):
+    """Download video with retry mechanism"""
+    for attempt in range(max_retries):
+        print(f"🔄 Download attempt {attempt + 1}/{max_retries}...")
         
-        if response.status_code == 200:
-            return response.text
-        else:
-            print(f"❌ Failed to download m3u8: {response.status_code}")
-            return None
-    except:
-        return None
-
-def download_video_segments(video_url, output_path):
-    """Download video by segments if needed"""
-    print("🎬 Downloading video segments...")
-    
-    try:
-        session = requests.Session()
-        headers = generate_headers()
-        
-        # Check if it's a playlist or direct video
-        if '.m3u8' in video_url:
-            print("📋 Processing m3u8 playlist...")
+        try:
+            session = requests.Session()
+            headers = generate_headers()
             
-            # Get playlist content
-            response = session.get(video_url, headers=headers, timeout=30)
+            # Add specific headers for VK CDN
+            if 'okcdn.ru' in video_url:
+                headers['Referer'] = 'https://vk.com/'
+                headers['Origin'] = 'https://vk.com/'
+            
+            print(f"📥 Downloading: {video_url[:100]}...")
+            
+            # Try HEAD request first to check availability
+            try:
+                head_response = session.head(video_url, headers=headers, timeout=10, allow_redirects=True)
+                print(f"📊 Status: {head_response.status_code}")
+                
+                if head_response.status_code != 200:
+                    print(f"⚠️ HEAD request failed: {head_response.status_code}")
+                    time.sleep(2)
+                    continue
+            except:
+                pass  # Continue anyway
+            
+            # Download the video
+            response = session.get(video_url, headers=headers, timeout=60, stream=True)
+            
             if response.status_code != 200:
-                print(f"❌ Failed to get playlist: {response.status_code}")
-                return False
+                print(f"❌ Download failed: {response.status_code}")
+                time.sleep(2)
+                continue
             
-            playlist = response.text
-            lines = playlist.split('\n')
+            total_size = int(response.headers.get('content-length', 0))
             
-            # Create temp directory for segments
-            temp_dir = "segments_temp"
-            os.makedirs(temp_dir, exist_ok=True)
+            if total_size > 0:
+                print(f"📊 File size: {total_size / (1024*1024):.1f} MB")
             
-            segment_files = []
-            segment_count = 0
-            
-            # Download video segments
-            base_url = '/'.join(video_url.split('/')[:-1])
-            
-            for line in lines:
-                if line and not line.startswith('#') and ('.ts' in line or '.m4s' in line):
-                    segment_count += 1
-                    print(f"📥 Downloading segment {segment_count}...")
-                    
-                    # Construct segment URL
-                    if line.startswith('http'):
-                        segment_url = line
-                    else:
-                        segment_url = f"{base_url}/{line}"
-                    
-                    # Download segment
-                    segment_file = os.path.join(temp_dir, f"segment_{segment_count:04d}.ts")
-                    
-                    try:
-                        seg_response = session.get(segment_url, headers=headers, timeout=30, stream=True)
-                        with open(segment_file, 'wb') as f:
-                            for chunk in seg_response.iter_content(chunk_size=8192):
-                                if chunk:
-                                    f.write(chunk)
+            with open(output_path, 'wb') as f:
+                downloaded = 0
+                start_time = time.time()
+                
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
                         
-                        segment_files.append(segment_file)
-                        
-                    except Exception as e:
-                        print(f"⚠️ Failed to download segment {segment_count}: {e}")
+                        # Show progress every 2MB
+                        if downloaded % (2 * 1024 * 1024) < 8192 and total_size > 0:
+                            elapsed = time.time() - start_time
+                            speed = downloaded / elapsed / 1024 if elapsed > 0 else 0
+                            percent = (downloaded / total_size) * 100 if total_size > 0 else 0
+                            print(f"📥 {percent:.1f}% - {downloaded / (1024*1024):.1f} MB - {speed:.0f} KB/s")
             
-            if segment_files:
-                print(f"✅ Downloaded {len(segment_files)} segments")
-                
-                # Combine segments using ffmpeg
-                print("🔗 Combining segments...")
-                
-                # Create file list for ffmpeg
-                list_file = os.path.join(temp_dir, "segments.txt")
-                with open(list_file, 'w') as f:
-                    for seg_file in segment_files:
-                        f.write(f"file '{seg_file}'\n")
-                
-                # Use ffmpeg to combine
-                cmd = [
-                    'ffmpeg',
-                    '-f', 'concat',
-                    '-safe', '0',
-                    '-i', list_file,
-                    '-c', 'copy',
-                    '-y',
-                    output_path
-                ]
-                
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-                
-                # Cleanup
-                try:
-                    shutil.rmtree(temp_dir)
-                except:
-                    pass
-                
-                if result.returncode == 0 and os.path.exists(output_path):
-                    file_size = os.path.getsize(output_path) / (1024 * 1024)
-                    print(f"✅ Combined successfully: {file_size:.1f} MB")
-                    return True
-                else:
-                    print(f"❌ Failed to combine segments: {result.stderr[:200]}")
-                    return False
+            elapsed = time.time() - start_time
+            final_size = os.path.getsize(output_path) / (1024 * 1024)
+            
+            if final_size > 0.5:  # At least 500KB
+                print(f"✅ Download complete: {final_size:.1f} MB in {elapsed:.1f}s")
+                return True
             else:
-                print("❌ No segments downloaded")
-                return False
-        
-        else:
-            # Direct video download
-            print("🔗 Direct video download...")
-            return download_direct_video(video_url, output_path)
-            
-    except Exception as e:
-        print(f"❌ Segment download error: {e}")
-        return False
-
-def download_direct_video(video_url, output_path):
-    """Download direct video file"""
-    try:
-        session = requests.Session()
-        headers = generate_headers()
-        
-        print(f"📥 Downloading: {video_url[:100]}...")
-        
-        response = session.get(video_url, headers=headers, timeout=60, stream=True)
-        
-        if response.status_code != 200:
-            print(f"❌ Download failed: {response.status_code}")
-            return False
-        
-        total_size = int(response.headers.get('content-length', 0))
-        
-        if total_size > 0:
-            print(f"📊 File size: {total_size / (1024*1024):.1f} MB")
-        
-        with open(output_path, 'wb') as f:
-            downloaded = 0
-            start_time = time.time()
-            
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    
-                    # Show progress every 5MB
-                    if downloaded % (5 * 1024 * 1024) < 8192:
-                        elapsed = time.time() - start_time
-                        speed = downloaded / elapsed / 1024 if elapsed > 0 else 0
-                        print(f"📥 {downloaded / (1024*1024):.1f} MB - {speed:.0f} KB/s")
-        
-        elapsed = time.time() - start_time
-        final_size = os.path.getsize(output_path) / (1024 * 1024)
-        print(f"✅ Download complete: {final_size:.1f} MB in {elapsed:.1f}s")
-        
-        return final_size > 0.1  # At least 100KB
-        
-    except Exception as e:
-        print(f"❌ Direct download error: {e}")
-        return False
+                print(f"⚠️ File too small: {final_size:.1f} MB")
+                os.remove(output_path)  # Remove small file
+                time.sleep(2)
+                continue
+                
+        except Exception as e:
+            print(f"❌ Download error: {e}")
+            time.sleep(2)
+    
+    return False
 
 def compress_to_240p(input_path, output_path):
     """Compress video to 240p"""
@@ -423,7 +394,7 @@ def compress_to_240p(input_path, output_path):
     input_size = os.path.getsize(input_path) / (1024 * 1024)
     print(f"📊 Input size: {input_size:.1f} MB")
     
-    # Check if already low quality
+    # Check current quality
     try:
         cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
                '-show_entries', 'stream=height', '-of', 'csv=p=0:nk=1', input_path]
@@ -538,95 +509,67 @@ async def process_vk_video(url, title):
     print(f"{'='*60}")
     
     timestamp = datetime.now().strftime('%H%M%S')
-    temp_dir = f"vk_temp_{timestamp}"
+    temp_dir = f"vk_{timestamp}"
     os.makedirs(temp_dir, exist_ok=True)
     
     temp_file = os.path.join(temp_dir, "video.mp4")
     final_file = os.path.join(temp_dir, "video_240p.mp4")
     
-    max_attempts = 3
-    current_attempt = 1
-    
-    while current_attempt <= max_attempts:
-        print(f"\n🔄 Attempt {current_attempt}/{max_attempts}")
-        
-        try:
-            # Step 1: Extract video URL
-            print("1️⃣ Extracting video URL...")
-            video_url = extract_vk_video_direct(url)
-            
-            if not video_url:
-                print("❌ Failed to extract video URL")
-                current_attempt += 1
-                time.sleep(2)
-                continue
-            
-            print(f"✅ Extracted URL: {video_url[:150]}...")
-            
-            # Step 2: Download
-            print("2️⃣ Downloading...")
-            
-            if '.m3u8' in video_url:
-                if not download_video_segments(video_url, temp_file):
-                    print("❌ Segment download failed")
-                    current_attempt += 1
-                    time.sleep(2)
-                    continue
-            else:
-                if not download_direct_video(video_url, temp_file):
-                    print("❌ Direct download failed")
-                    current_attempt += 1
-                    time.sleep(2)
-                    continue
-            
-            # Check file
-            if not os.path.exists(temp_file) or os.path.getsize(temp_file) < 1024:
-                print("❌ Downloaded file is invalid")
-                current_attempt += 1
-                time.sleep(2)
-                continue
-            
-            # Step 3: Compress
-            print("3️⃣ Compressing...")
-            if not compress_to_240p(temp_file, final_file):
-                final_file = temp_file
-            
-            # Step 4: Upload
-            print("4️⃣ Uploading...")
-            if not await upload_to_telegram(final_file, title):
-                print("❌ Upload failed")
-                current_attempt += 1
-                time.sleep(2)
-                continue
-            
-            # Success!
-            try:
-                shutil.rmtree(temp_dir)
-                print("🗑️ Cleaned temp files")
-            except:
-                pass
-            
-            return True, "✅ Success"
-            
-        except Exception as e:
-            print(f"❌ Attempt {current_attempt} failed: {e}")
-            current_attempt += 1
-            time.sleep(3)
-    
-    # All attempts failed
     try:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-    except:
-        pass
-    
-    return False, "❌ All attempts failed"
+        # Step 1: Extract REAL video URL (not tracking)
+        print("1️⃣ Extracting real video URL...")
+        video_url = extract_vk_video_smart(url)
+        
+        if not video_url:
+            print("❌ Failed to extract video URL")
+            return False, "Extraction failed"
+        
+        print(f"✅ Extracted REAL video URL: {video_url[:150]}...")
+        
+        # Step 2: Download
+        print("2️⃣ Downloading video...")
+        if not download_video_with_retry(video_url, temp_file, max_retries=3):
+            return False, "Download failed"
+        
+        # Check file
+        if not os.path.exists(temp_file) or os.path.getsize(temp_file) < 1024:
+            return False, "Downloaded file is invalid"
+        
+        print(f"📊 File size: {os.path.getsize(temp_file) / (1024*1024):.1f} MB")
+        
+        # Step 3: Compress
+        print("3️⃣ Compressing to 240p...")
+        if not compress_to_240p(temp_file, final_file):
+            final_file = temp_file
+        
+        # Step 4: Upload
+        print("4️⃣ Uploading to Telegram...")
+        if not await upload_to_telegram(final_file, title):
+            return False, "Upload failed"
+        
+        # Cleanup
+        try:
+            shutil.rmtree(temp_dir)
+            print("🗑️ Cleaned temp files")
+        except:
+            pass
+        
+        return True, "✅ Success"
+        
+    except Exception as e:
+        # Cleanup on error
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except:
+            pass
+        return False, f"Error: {str(e)}"
 
 async def main():
     """Main function"""
     print("="*60)
-    print("🎬 VK Ultimate Downloader v3.0")
-    print("🌐 Browser-like requests with segment downloading")
-    print("🔄 Multiple attempts with different approaches")
+    print("🎬 VK Smart Downloader v4.0")
+    print("🔍 Filters out tracking URLs, focuses on real video URLs")
+    print("🎯 Specialized for VK.com video extraction")
     print("="*60)
     
     # Check ffmpeg
