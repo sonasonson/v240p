@@ -560,44 +560,25 @@ def extract_with_cloudscraper(url):
     return None
 
 def extract_vidspeed_video_url(url):
-    """Extract video URL from vidspeed.org - Simple direct approach"""
-    print("🔍 Using direct vidspeed extractor...")
+    """Extract video URL from vidspeed.org by parsing JavaScript"""
+    print("🔍 Using advanced vidspeed extractor...")
     
     try:
-        # Extract video ID from URL
-        video_id = url.split('/')[-1].replace('.html', '').replace('embed-', '')
-        print(f"🎯 Video ID: {video_id}")
-        
-        # بناء روابط HLS محتملة بناءً على نمط الروابط من سجلات الشبكة
-        # من سجلات الشبكة: https://vsped-fs11-u3z.cdnz.quest/hls2/04/00177/vuwb2gl8mqyr_,l,n,.urlset/master.m3u8
-        # بناء عدة احتمالات
-        
-        base_patterns = [
-            f"https://vsped-fs11-u3z.cdnz.quest/hls2/04/00177/{video_id}_/master.m3u8",
-            f"https://vsped-fs11-u3z.cdnz.quest/hls2/04/00177/{video_id}/master.m3u8",
-            f"https://vsped-fs11-u3z.cdnz.quest/hls2/04/00177/{video_id}_,l,n,.urlset/master.m3u8",
-            f"https://vsped-fs11-u3z.cdnz.quest/hls2/04/00177/{video_id}_n/index-v1-a1.m3u8",
-            f"https://vsped-fs11-u3z.cdnz.quest/hls2/04/00177/{video_id}_l/index-v1-a1.m3u8",
-        ]
+        # Use cloudscraper to bypass Cloudflare
+        scraper = cloudscraper.create_scraper()
         
         headers = HEADERS.copy()
-        headers['Referer'] = url
+        headers.update({
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://vidspeed.org/',
+            'Sec-Fetch-Dest': 'iframe',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'cross-site',
+            'Upgrade-Insecure-Requests': '1'
+        })
         
-        for hls_url in base_patterns:
-            print(f"🔗 Testing HLS URL: {hls_url}")
-            try:
-                response = requests.head(hls_url, headers=headers, timeout=10, allow_redirects=True)
-                if response.status_code == 200:
-                    print(f"✅ Found working HLS URL: {hls_url}")
-                    return hls_url
-            except:
-                continue
-        
-        # إذا لم تعمل الروابط المباشرة، حاول استخراج من الصفحة
-        print("🔄 Trying to extract from page content...")
-        
-        # استخدم cloudscraper لجلب الصفحة
-        scraper = cloudscraper.create_scraper()
+        print("🌐 Fetching vidspeed page...")
         response = scraper.get(url, headers=headers, timeout=30)
         
         if response.status_code != 200:
@@ -606,32 +587,197 @@ def extract_vidspeed_video_url(url):
         
         content = response.text
         
-        # البحث عن روابط m3u8 في الصفحة
+        # Save page for debugging
+        with open('vidspeed_page.html', 'w', encoding='utf-8') as f:
+            f.write(content)
+        print("📝 Saved page to vidspeed_page.html")
+        
+        # Extract video ID from URL
+        video_id = url.split('/')[-1].replace('.html', '').replace('embed-', '')
+        print(f"🎯 Video ID: {video_id}")
+        
+        # From network logs, we saw this pattern:
+        # https://vsped-fs11-u3z.cdnz.quest/hls2/04/00177/vuwb2gl8mqyr_,l,n,.urlset/master.m3u8?t=b4nV7u-L5IatUVIEEzgE-s5OzJuwdIUT4lD6BW2vgCQ&s=1767722916&e=43200&v=13346114&i=0.3&sp=0
+        
+        # Try to extract parameters from JavaScript
+        print("🔍 Extracting parameters from JavaScript...")
+        
+        # Look for token (t parameter)
+        t_patterns = [
+            r'var\s+t\s*=\s*["\']([^"\']+)["\']',
+            r'token["\']?\s*[:=]\s*["\']([^"\']+)["\']',
+            r'["\']t["\']\s*:\s*["\']([^"\']+)["\']',
+            r'[?&]t=([^&"\']+)',
+        ]
+        
+        t_value = None
+        for pattern in t_patterns:
+            matches = re.findall(pattern, content)
+            if matches:
+                t_value = matches[0]
+                print(f"✅ Found t parameter: {t_value[:30]}...")
+                break
+        
+        # Look for s parameter
+        s_patterns = [
+            r'var\s+s\s*=\s*["\']?(\d+)["\']?',
+            r'["\']s["\']\s*:\s*["\']?(\d+)["\']?',
+            r'[?&]s=(\d+)',
+        ]
+        
+        s_value = None
+        for pattern in s_patterns:
+            matches = re.findall(pattern, content)
+            if matches:
+                s_value = matches[0]
+                print(f"✅ Found s parameter: {s_value}")
+                break
+        
+        # Look for e parameter
+        e_patterns = [
+            r'var\s+e\s*=\s*["\']?(\d+)["\']?',
+            r'["\']e["\']\s*:\s*["\']?(\d+)["\']?',
+            r'[?&]e=(\d+)',
+        ]
+        
+        e_value = None
+        for pattern in e_patterns:
+            matches = re.findall(pattern, content)
+            if matches:
+                e_value = matches[0]
+                print(f"✅ Found e parameter: {e_value}")
+                break
+        
+        # Look for v parameter
+        v_patterns = [
+            r'var\s+v\s*=\s*["\']?(\d+)["\']?',
+            r'["\']v["\']\s*:\s*["\']?(\d+)["\']?',
+            r'[?&]v=(\d+)',
+        ]
+        
+        v_value = None
+        for pattern in v_patterns:
+            matches = re.findall(pattern, content)
+            if matches:
+                v_value = matches[0]
+                print(f"✅ Found v parameter: {v_value}")
+                break
+        
+        # Look for i parameter
+        i_patterns = [
+            r'var\s+i\s*=\s*["\']?([\d.]+)["\']?',
+            r'["\']i["\']\s*:\s*["\']?([\d.]+)["\']?',
+            r'[?&]i=([\d.]+)',
+        ]
+        
+        i_value = None
+        for pattern in i_patterns:
+            matches = re.findall(pattern, content)
+            if matches:
+                i_value = matches[0]
+                print(f"✅ Found i parameter: {i_value}")
+                break
+        
+        # Look for sp parameter
+        sp_patterns = [
+            r'var\s+sp\s*=\s*["\']?(\d+)["\']?',
+            r'["\']sp["\']\s*:\s*["\']?(\d+)["\']?',
+            r'[?&]sp=(\d+)',
+        ]
+        
+        sp_value = None
+        for pattern in sp_patterns:
+            matches = re.findall(pattern, content)
+            if matches:
+                sp_value = matches[0]
+                print(f"✅ Found sp parameter: {sp_value}")
+                break
+        
+        # If we found all parameters, construct the URL
+        if t_value and s_value and e_value and v_value and i_value and sp_value:
+            hls_url = f"https://vsped-fs11-u3z.cdnz.quest/hls2/04/00177/{video_id}_,l,n,.urlset/master.m3u8?t={t_value}&s={s_value}&e={e_value}&v={v_value}&i={i_value}&sp={sp_value}"
+            print(f"🔗 Constructed HLS URL: {hls_url[:100]}...")
+            
+            # Test the URL
+            try:
+                test_headers = headers.copy()
+                test_headers['Referer'] = url
+                test_response = requests.head(hls_url, headers=test_headers, timeout=10, allow_redirects=True)
+                if test_response.status_code == 200:
+                    print(f"✅ Verified working HLS URL")
+                    return hls_url
+                else:
+                    print(f"⚠️ URL returned HTTP {test_response.status_code}")
+            except Exception as e:
+                print(f"⚠️ Error testing URL: {e}")
+        
+        # If parameter extraction failed, try direct approach with common patterns
+        print("🔄 Trying direct pattern matching...")
+        
+        # Look for any m3u8 URL in the page
         m3u8_patterns = [
-            r'https?://[^"\'\s]+\.m3u8[^"\'\s]*',
-            r'//[^"\'\s]+\.m3u8[^"\'\s]*',
-            r'"file"\s*:\s*"([^"]+\.m3u8[^"]*)"',
-            r'"sources"\s*:\s*\[[^\]]*"([^"]+\.m3u8[^"]*)"[^\]]*\]',
+            r'https?://vsped[^"\'\s]+\.cdnz\.quest/hls2/[^"\'\s]+\.m3u8[^"\'\s]*',
+            r'https?://[^"\'\s]+\.cdnz\.quest/hls2/[^"\'\s]+\.m3u8[^"\'\s]*',
+            r'//vsped[^"\'\s]+\.cdnz\.quest/hls2/[^"\'\s]+\.m3u8[^"\'\s]*',
         ]
         
         for pattern in m3u8_patterns:
             matches = re.findall(pattern, content)
             for match in matches:
-                if isinstance(match, str):
-                    hls_url = match.strip('"\'')
-                    if hls_url.startswith('//'):
-                        hls_url = 'https:' + hls_url
+                hls_url = match if match.startswith('http') else 'https:' + match
+                print(f"🔍 Found HLS URL: {hls_url[:100]}...")
+                
+                # Test the URL
+                try:
+                    test_headers = headers.copy()
+                    test_headers['Referer'] = url
+                    test_response = requests.head(hls_url, headers=test_headers, timeout=10, allow_redirects=True)
+                    if test_response.status_code == 200:
+                        print(f"✅ Verified working HLS URL")
+                        return hls_url
+                except:
+                    continue
+        
+        # Try to find JW Player configuration
+        print("🔍 Looking for JW Player config...")
+        jw_patterns = [
+            r'jwplayer\([^)]+\)\.setup\(({[^}]+})\)',
+            r'playerInstance\.setup\(({[^}]+})\)',
+            r'var\s+player\s*=\s*jwplayer\("[^"]+"\)\.setup\(({[^}]+})\)',
+        ]
+        
+        for pattern in jw_patterns:
+            matches = re.findall(pattern, content, re.DOTALL)
+            for match in matches:
+                try:
+                    # Clean the JSON
+                    json_str = match.strip()
+                    json_str = re.sub(r'//.*?\n', '\n', json_str)
+                    json_str = json_str.replace('\\"', '"').replace('\\/', '/')
+                    json_str = re.sub(r',\s*}', '}', json_str)
+                    json_str = re.sub(r',\s*]', ']', json_str)
                     
-                    print(f"🔍 Found potential HLS URL: {hls_url[:100]}...")
+                    config = json.loads(json_str)
                     
-                    # اختبار الرابط
-                    try:
-                        test_response = requests.head(hls_url, headers=headers, timeout=10, allow_redirects=True)
-                        if test_response.status_code == 200:
-                            print(f"✅ Verified working HLS URL: {hls_url}")
-                            return hls_url
-                    except:
-                        continue
+                    # Look for sources
+                    if 'sources' in config and isinstance(config['sources'], list):
+                        for source in config['sources']:
+                            if isinstance(source, dict) and 'file' in source:
+                                file_url = source['file']
+                                if '.m3u8' in file_url:
+                                    print(f"✅ Found HLS URL in JW Player sources: {file_url[:100]}...")
+                                    return file_url
+                    
+                    # Check for playlist
+                    if 'playlist' in config and isinstance(config['playlist'], list):
+                        for item in config['playlist']:
+                            if isinstance(item, dict) and 'sources' in item:
+                                for source in item['sources']:
+                                    if 'file' in source and '.m3u8' in source['file']:
+                                        print(f"✅ Found HLS URL in JW Player playlist: {source['file'][:100]}...")
+                                        return source['file']
+                except:
+                    continue
         
         print("❌ Could not extract video URL from vidspeed")
         return None
@@ -641,7 +787,6 @@ def extract_vidspeed_video_url(url):
         import traceback
         traceback.print_exc()
         return None
-
 def extract_video_url(url):
     """Extract direct video URL with multiple extraction methods"""
     print(f"🔍 Extracting from: {url}")
