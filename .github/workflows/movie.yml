@@ -6,15 +6,15 @@ on:
       watch_url:
         description: '🔗 رابط مشاهدة الفيلم'
         required: true
-        default: ''
+        default: 'https://example.com/watch/movie'
       movie_name_arabic:
         description: '📽️ اسم الفيلم (عربي)'
         required: true
-        default: ''
+        default: 'اسم الفيلم'
       movie_name_english:
         description: '📽️ اسم الفيلم (إنجليزي)'
         required: false
-        default: ''
+        default: 'Movie Name'
 
 jobs:
   upload-movie:
@@ -54,12 +54,6 @@ jobs:
         
         echo "✅ تم إنشاء movie_config.json"
         cat movie_config.json
-        
-        echo ""
-        echo "📋 معلومات الفيلم:"
-        echo "📽️ الاسم العربي: ${{ github.event.inputs.movie_name_arabic }}"
-        echo "📽️ الاسم الإنجليزي: ${{ github.event.inputs.movie_name_english }}"
-        echo "🔗 رابط المشاهدة: ${{ github.event.inputs.watch_url }}"
     
     - name: 🚀 تشغيل سكريبت الأفلام
       env:
@@ -69,4 +63,4 @@ jobs:
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
         echo "🎬 بدء رفع الفيلم..."
-        python movie_uploader.py 2>&1 | tee movie_processing.log
+        python movie_uploader.py 2>&1 | tee processing.log
