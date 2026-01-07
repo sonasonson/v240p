@@ -3,25 +3,29 @@ name: 🎬 Movie Uploader
 on:
   workflow_dispatch:
     inputs:
-      video_url:
-        description: '🔗 Video URL'
+      watch_url:
+        description: '🔗 رابط مشاهدة الفيلم'
         required: true
-        default: 'https://vk.com/video_ext.php?oid=791768803&id=456249035'
-      video_title:
-        description: '🎬 Movie Title'
+        default: 'https://example.com/watch/movie'
+      movie_name_arabic:
+        description: '📽️ اسم الفيلم (عربي)'
         required: true
-        default: 'اكس مراتي - الفيلم الكامل'
+        default: 'اسم الفيلم'
+      movie_name_english:
+        description: '📽️ اسم الفيلم (إنجليزي)'
+        required: false
+        default: 'Movie Name'
 
 jobs:
   upload-movie:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # زيادة المهلة للفيديوهات الطويلة
+    timeout-minutes: 180
     
     steps:
     - name: 📥 Checkout repository
       uses: actions/checkout@v4
     
-    - name: 🐍 Setup Python
+    - name: 🐍 Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
@@ -30,47 +34,39 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y ffmpeg python3-pip
-        
-    - name: 📦 Install Python packages
+    
+    - name: 📦 Install Python dependencies
       run: |
         pip install --upgrade pip
-        pip install pyrogram tgcrypto yt-dlp requests-html beautifulsoup4 cloudscraper
-        
-    - name: 🎬 Create config
+        pip install -r requirements.txt
+    
+    - name: 📽️ إعداد الفيلم
       run: |
-        echo "🎬 Creating video_config.json..."
-        cat > video_config.json << 'EOF'
+        echo "🎬 إعداد ملف الفيلم..."
+        
+        cat > movie_config.json << 'EOF'
         {
-          "videos": [
-            {
-              "url": "${{ github.event.inputs.video_url }}",
-              "title": "${{ github.event.inputs.video_title }}"
-            }
-          ]
+          "watch_url": "${{ github.event.inputs.watch_url }}",
+          "movie_name_arabic": "${{ github.event.inputs.movie_name_arabic }}",
+          "movie_name_english": "${{ github.event.inputs.movie_name_english }}"
         }
         EOF
-        echo "✅ Config created:"
-        cat video_config.json
+        
+        echo "✅ تم إنشاء movie_config.json"
+        cat movie_config.json
+        
+        echo ""
+        echo "📋 معلومات الفيلم:"
+        echo "📽️ الاسم العربي: ${{ github.event.inputs.movie_name_arabic }}"
+        echo "📽️ الاسم الإنجليزي: ${{ github.event.inputs.movie_name_english }}"
+        echo "🔗 رابط المشاهدة: ${{ github.event.inputs.watch_url }}"
     
-    - name: 🚀 Run Movie Uploader
+    - name: 🚀 تشغيل سكريبت الأفلام
       env:
         API_ID: ${{ secrets.API_ID }}
         API_HASH: ${{ secrets.API_HASH }}
         CHANNEL: ${{ secrets.CHANNEL }}
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
-        echo "🚀 Starting Movie Uploader..."
-        echo "📅 $(date)"
-        echo "=========================================="
-        echo "🎯 Strategy: Download Low Quality → Compress to 240p"
-        echo "=========================================="
-        python -u video.py 2>&1
-        
-    - name: 📤 Save logs
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: movie-logs-${{ github.run_number }}
-        path: |
-          video_config.json
-        retention-days: 3
+        echo "🎬 بدء رفع الفيلم..."
+        python movie_uploader.py 2>&1 | tee movie_processing.log
