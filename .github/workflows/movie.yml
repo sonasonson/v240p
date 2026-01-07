@@ -1,12 +1,12 @@
-name: 🎬 Movie Uploader (Direct Links)
+name: 🎬 Movie Uploader (240p with Progress)
 
 on:
   workflow_dispatch:
     inputs:
-      video_url:
-        description: '🔗 رابط الفيديو المباشر (MP4)'
+      watch_url:
+        description: '🔗 رابط الفيديو (MP4 أو M3U8)'
         required: true
-        default: 'https://example.com/video.mp4'
+        default: 'https://example.com/video.m3u8'
       movie_name_arabic:
         description: '📽️ اسم الفيلم (عربي)'
         required: true
@@ -17,9 +17,9 @@ on:
         default: ''
 
 jobs:
-  upload-movie:
+  upload-movie-240p:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     
     steps:
     - name: 📥 Checkout repository
@@ -33,8 +33,12 @@ jobs:
     - name: ⚙️ Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg wget python3-pip
-        pip install pyrogram tgcrypto
+        sudo apt-get install -y ffmpeg python3-pip
+        
+    - name: 📦 Install Python packages
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
     
     - name: 📽️ إعداد الفيلم
       run: |
@@ -42,12 +46,13 @@ jobs:
         
         cat > movie_config.json << 'EOF'
         {
-          "watch_url": "${{ github.event.inputs.video_url }}",
+          "watch_url": "${{ github.event.inputs.watch_url }}",
           "movie_name_arabic": "${{ github.event.inputs.movie_name_arabic }}",
           "movie_name_english": "${{ github.event.inputs.movie_name_english }}"
         }
         EOF
         
+        echo "✅ تم إنشاء ملف الإعدادات"
         cat movie_config.json
     
     - name: 🚀 تشغيل السكربت
@@ -57,4 +62,6 @@ jobs:
         CHANNEL: ${{ secrets.CHANNEL }}
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
-        python simple_movie_uploader.py
+        echo "🎬 بدء عملية رفع الفيلم..."
+        python movie_uploader_final.py 2>&1 | tee upload.log
+        echo "✅ العملية اكتملت"
