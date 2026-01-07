@@ -1,4 +1,4 @@
-name: 🎬 Movie Uploader (240p with Progress)
+name: 🎬 Movie Uploader (Cloudscraper)
 
 on:
   workflow_dispatch:
@@ -17,9 +17,9 @@ on:
         default: ''
 
 jobs:
-  upload-movie-240p:
+  upload-movie:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     
     steps:
     - name: 📥 Checkout repository
@@ -30,10 +30,10 @@ jobs:
       with:
         python-version: '3.10'
     
-    - name: ⚙️ Install dependencies
+    - name: ⚙️ Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg python3-pip
+        sudo apt-get install -y ffmpeg python3-pip wget curl
         
     - name: 📦 Install Python packages
       run: |
@@ -63,5 +63,5 @@ jobs:
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
         echo "🎬 بدء عملية رفع الفيلم..."
-        python movie_uploader_final.py 2>&1 | tee upload.log
+        python movie_uploader_final.py 2>&1 | tee -a upload.log
         echo "✅ العملية اكتملت"
