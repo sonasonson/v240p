@@ -80,7 +80,7 @@ def install_requirements():
     requirements = [
         "pyrogram>=2.0.0",
         "tgcrypto>=1.2.0",
-        "yt-dlp>=2024.4.9",
+        "yt-dlp>=2025.12.08",
         "requests>=2.31.0",
         "cloudscraper>=1.2.71",
         "beautifulsoup4>=4.12.0",
