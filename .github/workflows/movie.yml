@@ -1,12 +1,12 @@
-name: 🎬 Movie Uploader
+name: 🎬 Movie Uploader (Direct Links)
 
 on:
   workflow_dispatch:
     inputs:
-      watch_url:
-        description: '🔗 رابط مشاهدة الفيلم'
+      video_url:
+        description: '🔗 رابط الفيديو المباشر (MP4)'
         required: true
-        default: 'https://example.com/watch/movie'
+        default: 'https://example.com/video.mp4'
       movie_name_arabic:
         description: '📽️ اسم الفيلم (عربي)'
         required: true
@@ -14,12 +14,12 @@ on:
       movie_name_english:
         description: '📽️ اسم الفيلم (إنجليزي)'
         required: false
-        default: 'Movie Name'
+        default: ''
 
 jobs:
   upload-movie:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 60
     
     steps:
     - name: 📥 Checkout repository
@@ -30,15 +30,11 @@ jobs:
       with:
         python-version: '3.10'
     
-    - name: ⚙️ Install system dependencies
+    - name: ⚙️ Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg python3-pip
-    
-    - name: 📦 Install Python dependencies
-      run: |
-        pip install --upgrade pip
-        pip install -r requirements.txt
+        sudo apt-get install -y ffmpeg wget python3-pip
+        pip install pyrogram tgcrypto
     
     - name: 📽️ إعداد الفيلم
       run: |
@@ -46,21 +42,19 @@ jobs:
         
         cat > movie_config.json << 'EOF'
         {
-          "watch_url": "${{ github.event.inputs.watch_url }}",
+          "watch_url": "${{ github.event.inputs.video_url }}",
           "movie_name_arabic": "${{ github.event.inputs.movie_name_arabic }}",
           "movie_name_english": "${{ github.event.inputs.movie_name_english }}"
         }
         EOF
         
-        echo "✅ تم إنشاء movie_config.json"
         cat movie_config.json
     
-    - name: 🚀 تشغيل سكريبت الأفلام
+    - name: 🚀 تشغيل السكربت
       env:
         API_ID: ${{ secrets.API_ID }}
         API_HASH: ${{ secrets.API_HASH }}
         CHANNEL: ${{ secrets.CHANNEL }}
         STRING_SESSION: ${{ secrets.STRING_SESSION }}
       run: |
-        echo "🎬 بدء رفع الفيلم..."
-        python movie_uploader.py 2>&1 | tee processing.log
+        python simple_movie_uploader.py
