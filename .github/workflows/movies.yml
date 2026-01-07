@@ -6,15 +6,15 @@ on:
       watch_url:
         description: '🔗 رابط مشاهدة الفيلم'
         required: true
-        default: 'https://example.com/watch/movie'
+        default: ''
       movie_name_arabic:
         description: '📽️ اسم الفيلم (عربي)'
         required: true
-        default: 'اسم الفيلم'
+        default: ''
       movie_name_english:
         description: '📽️ اسم الفيلم (إنجليزي)'
         required: false
-        default: 'Movie Name'
+        default: ''
 
 jobs:
   upload-movie:
