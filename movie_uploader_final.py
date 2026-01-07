@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """
-Telegram Movie Uploader with Cloudscraper & 240p Compression
+Universal Video Uploader - For Movies
+Download 240p minimum quality then compress to 240p
+Enhanced URL extraction for multiple sites
 """
 
 import os
 import sys
+import re
 import time
 import json
+import requests
 import subprocess
 import shutil
 import asyncio
-import tempfile
+import threading
 from datetime import datetime
+from urllib.parse import urlparse, urljoin, quote, parse_qs
 
 # ===== CONFIGURATION =====
 TELEGRAM_API_ID = os.environ.get("API_ID", "")
@@ -19,392 +24,736 @@ TELEGRAM_API_HASH = os.environ.get("API_HASH", "")
 TELEGRAM_CHANNEL = os.environ.get("CHANNEL", "")
 STRING_SESSION = os.environ.get("STRING_SESSION", "")
 
-if not all([TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_CHANNEL, STRING_SESSION]):
-    print("❌ Missing environment variables")
+def validate_env():
+    """Validate environment variables"""
+    print("🔍 Validating environment variables...")
+    
+    errors = []
+    if not TELEGRAM_API_ID:
+        errors.append("❌ API_ID is missing")
+    if not TELEGRAM_API_HASH:
+        errors.append("❌ API_HASH is missing")
+    if not TELEGRAM_CHANNEL:
+        errors.append("❌ CHANNEL is missing")
+    if not STRING_SESSION:
+        errors.append("❌ STRING_SESSION is missing")
+    
+    if errors:
+        for error in errors:
+            print(error)
+        return False
+    
+    print("✅ Environment variables validated")
+    return True
+
+if not validate_env():
     sys.exit(1)
 
 TELEGRAM_API_ID = int(TELEGRAM_API_ID)
 
-# ===== INSTALL REQUIREMENTS =====
-def install_requirements():
-    print("📦 Installing requirements...")
-    
-    requirements = [
-        "pyrogram>=2.0.0",
-        "tgcrypto>=1.2.0",
-        "yt-dlp>=2024.12.08",  # Latest version
-        "requests>=2.31.0",
-        "tqdm>=4.66.0",
-        "cloudscraper>=1.2.71",
-        "browser_cookie3>=0.19.1",
-    ]
-    
-    for req in requirements:
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", req, "--quiet"])
-        except:
-            pass
-    
-    print("✅ Requirements installed")
-
-install_requirements()
+# Install requirements
+print("📦 Installing requirements...")
+requirements = ["pyrogram", "tgcrypto", "yt-dlp", "requests", "beautifulsoup4", "cloudscraper"]
+for req in requirements:
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", req, "--quiet"])
+        print(f"  ✅ {req}")
+    except:
+        print(f"  ❌ {req}")
 
 from pyrogram import Client
 from pyrogram.errors import FloodWait
 import yt_dlp
+from bs4 import BeautifulSoup
 import cloudscraper
-from tqdm import tqdm
-import browser_cookie3
 
 app = None
 
-# ===== TELEGRAM SETUP =====
+# Headers for various sites
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+}
+
 async def setup_telegram():
+    """Setup Telegram client"""
     global app
-    
-    print("="*50)
-    print("🔐 Setting up Telegram...")
+    print("\n🔐 Setting up Telegram...")
     
     try:
         app = Client(
-            name="movie_uploader",
+            "movie_uploader",
             api_id=TELEGRAM_API_ID,
             api_hash=TELEGRAM_API_HASH,
             session_string=STRING_SESSION.strip(),
             in_memory=True,
+            device_model="GitHub Actions",
+            app_version="2.0.0",
+            system_version="Ubuntu 22.04"
         )
         
         await app.start()
         me = await app.get_me()
-        print(f"✅ Connected as: {me.first_name}")
+        print(f"✅ Connected as: {me.first_name} (@{me.username if me.username else 'N/A'})")
         
-        chat = await app.get_chat(TELEGRAM_CHANNEL)
-        print(f"📢 Channel: {chat.title}")
-        return True
-        
+        # Verify channel access
+        try:
+            chat = await app.get_chat(TELEGRAM_CHANNEL)
+            print(f"📢 Channel found: {chat.title}")
+            return True
+        except Exception as e:
+            print(f"❌ Cannot access channel: {e}")
+            return False
+            
     except Exception as e:
         print(f"❌ Telegram setup failed: {e}")
         return False
 
-def get_cookies_from_browser():
-    """Try to get cookies from browser to bypass protection"""
-    try:
-        # Try Chrome first
-        cj = browser_cookie3.chrome(domain_name='vidoba.org')
-        cookies_dict = {}
-        for cookie in cj:
-            cookies_dict[cookie.name] = cookie.value
-        
-        if cookies_dict:
-            print(f"🍪 Found {len(cookies_dict)} cookies from browser")
-            return cookies_dict
-    except:
-        pass
+def clean_vk_url(url):
+    """Clean VK URL from escape characters and fix common issues"""
+    if not url:
+        return url
     
-    return None
+    # Remove backslashes first
+    url = url.replace('\\/', '/').replace('\\\\', '\\')
+    url = url.replace('\\"', '"').replace("\\'", "'")
+    
+    # Fix https://
+    if url.startswith('https:\\/\\/'):
+        url = url.replace('https:\\/\\/', 'https://')
+    elif url.startswith('http:\\/\\/'):
+        url = url.replace('http:\\/\\/', 'http://')
+    
+    # Fix double slashes in URL path (important fix)
+    parsed = urlparse(url)
+    
+    # Reconstruct URL with proper slashes
+    if parsed.netloc:
+        # Fix path to remove double slashes
+        path = parsed.path.replace('//', '/')
+        # Reconstruct URL
+        url = f"{parsed.scheme}://{parsed.netloc}{path}"
+        if parsed.query:
+            url += f"?{parsed.query}"
+    
+    # Remove trailing dot if present
+    if url.endswith('.'):
+        url = url[:-1]
+    
+    return url.strip()
 
-def create_cookie_file(cookies_dict):
-    """Create a cookie file from cookies dict"""
-    if not cookies_dict:
-        return None
+def fix_cdn_url(url):
+    """Fix CDN URLs that have incorrect formatting"""
+    if not url:
+        return url
     
-    cookie_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt')
+    # Fix double slashes after domain
+    if '//' in url:
+        # Only fix after the protocol part
+        parts = url.split('://')
+        if len(parts) == 2:
+            protocol = parts[0]
+            rest = parts[1]
+            # Fix multiple slashes in path
+            rest = rest.replace('//', '/')
+            url = f"{protocol}://{rest}"
     
-    # Write cookies in Netscape format
-    for name, value in cookies_dict.items():
-        cookie_file.write(f"{name}\t{value}\t/\tvidoba.org\tFALSE\t/\tFALSE\n")
-    
-    cookie_file.close()
-    return cookie_file.name
+    return url
 
-def download_with_cloudscraper(url, output_path):
-    """Download using cloudscraper to bypass Cloudflare"""
-    print(f"🛡️ Using cloudscraper to bypass protection...")
+def get_minimum_240p_m3u8(m3u8_url):
+    """Get minimum 240p stream from m3u8 playlist (ignore 144p)"""
+    print("🔍 Looking for minimum 240p quality in m3u8...")
     
     try:
-        # Create cloudscraper instance
-        scraper = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'mobile': False,
-                'desktop': True,
-            }
-        )
+        # Fix URL first
+        m3u8_url = clean_vk_url(m3u8_url)
+        m3u8_url = fix_cdn_url(m3u8_url)
         
-        # Try to get page
-        response = scraper.get(url, timeout=30)
+        # Add referer header for VK
+        headers = HEADERS.copy()
+        headers['Referer'] = 'https://vk.com/'
+        
+        # Fetch the m3u8 playlist
+        print(f"📥 Fetching playlist from: {m3u8_url[:100]}...")
+        response = requests.get(m3u8_url, headers=headers, timeout=30)
+        if response.status_code != 200:
+            print(f"⚠️ Failed to fetch playlist: HTTP {response.status_code}")
+            return m3u8_url
+        
+        m3u8_content = response.text
+        
+        # Check if this is a master playlist with multiple qualities
+        if '#EXT-X-STREAM-INF' in m3u8_content:
+            print("🎬 Found multiple qualities in master playlist")
+            
+            # Parse the playlist
+            lines = m3u8_content.split('\n')
+            streams = []
+            current_stream = {}
+            
+            for i, line in enumerate(lines):
+                if line.startswith('#EXT-X-STREAM-INF'):
+                    # Extract resolution
+                    res_match = re.search(r'RESOLUTION=(\d+)x(\d+)', line)
+                    if res_match:
+                        width = int(res_match.group(1))
+                        height = int(res_match.group(2))
+                        current_stream = {
+                            'height': height,
+                            'width': width,
+                            'bandwidth': 0,
+                            'url': None
+                        }
+                        
+                        # Extract bandwidth if available
+                        bw_match = re.search(r'BANDWIDTH=(\d+)', line)
+                        if bw_match:
+                            current_stream['bandwidth'] = int(bw_match.group(1))
+                
+                elif line and not line.startswith('#') and current_stream:
+                    current_stream['url'] = line.strip()
+                    
+                    # Make URL absolute if relative
+                    if not current_stream['url'].startswith('http'):
+                        base_url = '/'.join(m3u8_url.split('/')[:-1])
+                        current_stream['url'] = f"{base_url}/{current_stream['url']}"
+                    
+                    streams.append(current_stream.copy())
+                    current_stream = {}
+            
+            if streams:
+                # Sort by height (lowest first)
+                streams.sort(key=lambda x: x['height'])
+                
+                print(f"📊 Available qualities:")
+                for stream in streams:
+                    quality = f"{stream['height']}p"
+                    bandwidth_kbps = stream['bandwidth'] / 1000 if stream['bandwidth'] > 0 else 'N/A'
+                    print(f"  • {quality} (Bandwidth: {bandwidth_kbps}kbps)")
+                
+                # Strategy: Find minimum 240p or higher, ignore 144p
+                selected_stream = None
+                
+                # First, try to find 240p exactly
+                for stream in streams:
+                    if stream['height'] == 240:
+                        selected_stream = stream
+                        print(f"✅ Found exact 240p quality")
+                        break
+                
+                # If no 240p, find the next higher quality (ignoring 144p)
+                if not selected_stream:
+                    for stream in streams:
+                        if stream['height'] > 144:  # Ignore 144p
+                            selected_stream = stream
+                            print(f"⚠️ No 240p found, selecting {stream['height']}p (ignoring 144p)")
+                            break
+                
+                # If still no stream found (only 144p available), take 144p
+                if not selected_stream:
+                    selected_stream = streams[0]  # This will be 144p
+                    print(f"⚠️ Only 144p available, selecting it as last resort")
+                
+                print(f"✅ Selected: {selected_stream['height']}p")
+                return selected_stream['url']
+        
+        return m3u8_url
+        
+    except Exception as e:
+        print(f"⚠️ Error parsing m3u8: {e}")
+        return m3u8_url
+
+def normalize_vk_url(url):
+    """Normalize VK video URLs to standard format"""
+    # Convert short format to long format
+    # https://vk.com/video791768803_456250107 -> https://vk.com/video_ext.php?oid=791768803&id=456250107
+    match = re.match(r'.*vk\.com/video(\d+)_(\d+)', url)
+    if match:
+        oid = match.group(1)
+        vid = match.group(2)
+        return f"https://vk.com/video_ext.php?oid={oid}&id={vid}"
+    
+    return url
+
+def extract_vk_video_url_advanced(video_page_url):
+    """Advanced VK video URL extraction with multiple methods"""
+    print("🔍 Using advanced VK extractor...")
+    
+    # Normalize URL first
+    video_page_url = normalize_vk_url(video_page_url)
+    
+    try:
+        # Create a scraper to bypass Cloudflare
+        scraper = cloudscraper.create_scraper()
+        
+        # Fetch the page
+        print("🌐 Fetching VK page...")
+        response = scraper.get(video_page_url, headers=HEADERS, timeout=30)
         
         if response.status_code != 200:
-            print(f"⚠️ Cloudscraper failed with status: {response.status_code}")
-            return False
+            print(f"⚠️ HTTP {response.status_code}")
+            return None
         
-        print(f"✅ Cloudscraper accessed page successfully")
-        return True
+        # Method 1: Look for JSON data
+        print("🔍 Method 1: Searching for JSON data...")
         
-    except Exception as e:
-        print(f"❌ Cloudscraper failed: {e}")
-        return False
-
-def download_video_with_ytdlp(url, output_path):
-    """Download video using yt-dlp with enhanced settings"""
-    print(f"📥 Starting download...")
-    
-    try:
-        # Get cookies from browser if possible
-        cookies_dict = get_cookies_from_browser()
-        cookie_file = create_cookie_file(cookies_dict)
-        
-        # Enhanced headers
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://vidoba.org/',
-            'Origin': 'https://vidoba.org',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'same-origin',
-            'DNT': '1',
-            'Upgrade-Insecure-Requests': '1',
-        }
-        
-        # Custom progress hook
-        last_update = [0]
-        
-        def progress_hook(d):
-            if d['status'] == 'downloading':
-                downloaded = d.get('downloaded_bytes', 0)
-                total = d.get('total_bytes', 0) or d.get('total_bytes_estimate', 0)
-                
-                current_time = time.time()
-                if current_time - last_update[0] > 0.5:  # Update every 0.5 seconds
-                    if total:
-                        percent = (downloaded / total) * 100
-                        speed = d.get('speed', 0)
-                        if speed:
-                            speed_mb = speed / (1024 * 1024)
-                            print(f"📥 Downloading: {percent:.1f}% | Speed: {speed_mb:.1f} MB/s", end='\r')
-                        else:
-                            print(f"📥 Downloading: {percent:.1f}%", end='\r')
-                    else:
-                        print(f"📥 Downloading: {downloaded:,} bytes", end='\r')
-                    last_update[0] = current_time
-            
-            elif d['status'] == 'finished':
-                print(f"\n✅ Download completed!")
-        
-        # yt-dlp options
-        ydl_opts = {
-            'format': 'best[height<=720]',
-            'outtmpl': output_path,
-            'quiet': False,
-            'no_warnings': False,
-            'progress_hooks': [progress_hook],
-            'user_agent': headers['User-Agent'],
-            'retries': 20,
-            'fragment_retries': 20,
-            'skip_unavailable_fragments': True,
-            'concurrent_fragment_downloads': 10,
-            'http_headers': headers,
-            'socket_timeout': 60,
-            'extractor_args': {
-                'generic': {
-                    'player_skip': ['all'],
-                    'ignore_no_formats_error': True,
-                }
-            },
-            'cookiefile': cookie_file if cookie_file else None,
-        }
-        
-        start_time = time.time()
-        
-        # Try multiple extractors
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            try:
-                # First try with generic extractor
-                info = ydl.extract_info(url, download=False)
-            except Exception as e:
-                print(f"⚠️ First extraction failed: {e}")
-                # Try with force_generic_extractor
-                ydl_opts['force_generic_extractor'] = True
-                ydl = yt_dlp.YoutubeDL(ydl_opts)
-                info = ydl.extract_info(url, download=False)
-            
-            if info:
-                duration = info.get('duration', 0)
-                if duration:
-                    hours = duration // 3600
-                    minutes = (duration % 3600) // 60
-                    seconds = duration % 60
-                    print(f"⏱️ Video duration: {hours:02d}:{minutes:02d}:{seconds:02d}")
-                
-                print(f"📊 Available formats: {len(info.get('formats', []))}")
-                
-                # Start download
-                print("🚀 Starting download process...")
-                ydl.download([url])
-        
-        elapsed = time.time() - start_time
-        
-        # Clean up cookie file
-        if cookie_file and os.path.exists(cookie_file):
-            os.unlink(cookie_file)
-        
-        # Check result
-        if os.path.exists(output_path):
-            size = os.path.getsize(output_path) / (1024 * 1024)
-            print(f"✅ Download successful: {size:.1f}MB in {elapsed:.1f}s")
-            return True
-        
-        # Check alternative extensions
-        base, _ = os.path.splitext(output_path)
-        for ext in ['.mp4', '.mkv', '.webm', '.ts', '.m4a', '.flv']:
-            alt_path = base + ext
-            if os.path.exists(alt_path):
-                shutil.move(alt_path, output_path)
-                size = os.path.getsize(output_path) / (1024 * 1024)
-                print(f"✅ Downloaded as {ext}: {size:.1f}MB")
-                return True
-        
-        return False
-        
-    except Exception as e:
-        print(f"\n❌ Download failed: {str(e)[:200]}")
-        return False
-
-def compress_to_240p_with_progress(input_file, output_file):
-    """Compress video to 240p with progress display"""
-    if not os.path.exists(input_file):
-        print(f"❌ Input file not found")
-        return False
-    
-    original_size = os.path.getsize(input_file) / (1024 * 1024)
-    print(f"🎬 Starting compression to 240p...")
-    print(f"📊 Original size: {original_size:.1f}MB")
-    
-    # Get duration for progress
-    duration = 0
-    try:
-        cmd = [
-            'ffprobe',
-            '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            input_file
+        # Try to find JSON config
+        json_patterns = [
+            r'var\s+playerParams\s*=\s*({[^;]+});',
+            r'videoPlayerInit\s*\(\s*({[^}]+})',
+            r'var\s+videoData\s*=\s*({[^;]+});',
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            duration = float(result.stdout.strip())
-            minutes = int(duration // 60)
-            seconds = int(duration % 60)
-            print(f"⏱️ Duration: {minutes}:{seconds:02d}")
+        
+        for pattern in json_patterns:
+            match = re.search(pattern, response.text, re.DOTALL)
+            if match:
+                try:
+                    json_str = match.group(1)
+                    # Fix JSON string
+                    json_str = json_str.replace('\\"', '"').replace('\\/', '/')
+                    data = json.loads(json_str)
+                    
+                    # Look for video URLs in JSON
+                    if 'hls' in data:
+                        url = clean_vk_url(data['hls'])
+                        if url:
+                            print(f"✅ Found hls URL in JSON")
+                            video_url = get_minimum_240p_m3u8(url)
+                            if video_url:
+                                return video_url
+                    
+                    # Check for mp4 URLs
+                    for key in ['url', 'url240', 'url360', 'url480', 'url720', 'url1080']:
+                        if key in data and data[key]:
+                            url = clean_vk_url(data[key])
+                            if url and '.mp4' in url:
+                                print(f"✅ Found {key} in JSON: {url[:80]}...")
+                                return url
+                except:
+                    pass
+        
+        # Method 2: Look for iframe
+        print("🔍 Method 2: Searching for iframe...")
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Look for all video-related iframes
+        iframes = soup.find_all('iframe')
+        for iframe in iframes:
+            src = iframe.get('src', '')
+            if src and 'video' in src:
+                if src.startswith('//'):
+                    src = 'https:' + src
+                
+                print(f"📺 Found video iframe: {src}")
+                try:
+                    iframe_response = scraper.get(src, headers=HEADERS, timeout=30)
+                    
+                    # Look for m3u8 in iframe
+                    m3u8_patterns = [
+                        r'src="([^"]+\.m3u8[^"]*)"',
+                        r'https?://[^"\']+\.m3u8[^"\']*',
+                    ]
+                    
+                    for pattern in m3u8_patterns:
+                        matches = re.findall(pattern, iframe_response.text)
+                        for match in matches:
+                            url = clean_vk_url(match)
+                            if url and '.m3u8' in url:
+                                print(f"✅ Found m3u8 in iframe")
+                                video_url = get_minimum_240p_m3u8(url)
+                                if video_url:
+                                    return video_url
+                except Exception as e:
+                    print(f"⚠️ Iframe error: {e}")
+        
+        # Method 3: Direct regex search for video URLs
+        print("🔍 Method 3: Direct regex search...")
+        
+        video_patterns = [
+            r'"hls":"([^"]+)"',
+            r'"url[0-9]*":"([^"]+)"',
+            r'https?://[^"\']+\.m3u8[^"\']*',
+            r'https?://[^"\']+\.mp4[^"\']*',
+        ]
+        
+        for pattern in video_patterns:
+            matches = re.findall(pattern, response.text)
+            for match in matches:
+                if isinstance(match, str) and ('http' in match or '.m3u8' in match or '.mp4' in match):
+                    url = clean_vk_url(match)
+                    url = fix_cdn_url(url)
+                    
+                    if url and ('.m3u8' in url or '.mp4' in url):
+                        print(f"✅ Found URL with pattern: {url[:80]}...")
+                        if '.m3u8' in url:
+                            video_url = get_minimum_240p_m3u8(url)
+                            if video_url:
+                                return video_url
+                        else:
+                            return url
+        
+        # Method 4: Try to extract from meta tags
+        print("🔍 Method 4: Checking meta tags...")
+        meta_tags = soup.find_all('meta')
+        for meta in meta_tags:
+            content = meta.get('content', '')
+            if 'm3u8' in content or 'mp4' in content:
+                url = clean_vk_url(content)
+                if url and ('http' in url or '//' in url):
+                    print(f"✅ Found URL in meta tag: {url[:80]}...")
+                    if '.m3u8' in url:
+                        video_url = get_minimum_240p_m3u8(url)
+                        if video_url:
+                            return video_url
+                    else:
+                        return url
+        
+        print("❌ No video URL found with any method")
+        return None
+        
+    except Exception as e:
+        print(f"⚠️ VK extraction error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def extract_with_ytdlp(url):
+    """Extract video URL using yt-dlp for any site"""
+    print("🔍 Trying yt-dlp extractor...")
+    
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'socket_timeout': 30,
+            'force_generic_extractor': False,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            if not info:
+                return None
+            
+            # Get the best format URL
+            if 'url' in info:
+                video_url = info['url']
+                height = info.get('height', 0)
+                print(f"✅ yt-dlp found {height}p URL")
+                return video_url
+            
+            # If no direct URL, try to get from formats
+            elif 'formats' in info and info['formats']:
+                # Filter for video formats with height >= 240
+                formats = [f for f in info['formats'] 
+                          if f.get('vcodec') != 'none' and f.get('height', 0) >= 240]
+                
+                if formats:
+                    # Sort by height (lowest first)
+                    formats.sort(key=lambda x: x.get('height', 0))
+                    selected_format = formats[0]
+                    video_url = selected_format['url']
+                    height = selected_format.get('height', 0)
+                    print(f"✅ yt-dlp found {height}p URL from formats")
+                    return video_url
+            
+            print("❌ yt-dlp couldn't extract video URL")
+            return None
+            
+    except Exception as e:
+        print(f"⚠️ yt-dlp extraction failed: {e}")
+        return None
+
+def extract_generic_video_url(url):
+    """Generic video URL extractor for various sites"""
+    print("🔍 Using generic extractor...")
+    
+    try:
+        headers = HEADERS.copy()
+        
+        # Set referer based on domain
+        parsed = urlparse(url)
+        headers['Referer'] = f"{parsed.scheme}://{parsed.netloc}"
+        
+        response = requests.get(url, headers=headers, timeout=30)
+        
+        if response.status_code != 200:
+            print(f"⚠️ HTTP {response.status_code}")
+            return None
+        
+        # Look for common video patterns
+        patterns = [
+            r'src=["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'src=["\']([^"\']+\.m3u8[^"\']*)["\']',
+            r'video["\']\s*:\s*["\']([^"\']+)["\']',
+            r'file["\']\s*:\s*["\']([^"\']+)["\']',
+            r'https?://[^"\'\s<>]+\.mp4',
+            r'https?://[^"\'\s<>]+\.m3u8',
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, response.text, re.IGNORECASE)
+            for match in matches:
+                if isinstance(match, str) and ('http' in match or '.mp4' in match or '.m3u8' in match):
+                    # Make absolute URL if relative
+                    if match.startswith('//'):
+                        video_url = 'https:' + match
+                    elif match.startswith('/'):
+                        video_url = f"{parsed.scheme}://{parsed.netloc}{match}"
+                    else:
+                        video_url = match
+                    
+                    print(f"✅ Found URL with pattern: {video_url[:80]}...")
+                    return video_url
+        
+        return None
+        
+    except Exception as e:
+        print(f"⚠️ Generic extraction failed: {e}")
+        return None
+
+def extract_video_url(url):
+    """Extract direct video URL with multiple extraction methods"""
+    print(f"🔍 Extracting from: {url}")
+    
+    # Normalize VK URLs first
+    original_url = url
+    if 'vk.com' in url or 'vkontakte' in url:
+        url = normalize_vk_url(url)
+        print(f"🔧 Normalized VK URL: {url}")
+    
+    # Method 1: Try yt-dlp first (works for many sites)
+    video_url = extract_with_ytdlp(url)
+    if video_url:
+        return video_url
+    
+    # Method 2: Site-specific extractors
+    parsed_url = urlparse(url)
+    
+    # VK.com specific extraction
+    if 'vk.com' in parsed_url.netloc or 'vkontakte' in parsed_url.netloc:
+        print("🔄 Trying VK-specific extractor...")
+        video_url = extract_vk_video_url_advanced(url)
+        if video_url:
+            return video_url
+    
+    # Method 3: Generic extraction for other sites
+    print("🔄 Trying generic extractor...")
+    video_url = extract_generic_video_url(url)
+    if video_url:
+        return video_url
+    
+    # Method 4: Fallback to direct yt-dlp download
+    print("🔄 Fallback: Direct yt-dlp download attempt...")
+    try:
+        # Create a temporary file to test download
+        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+            # Just check if we can get info
+            info = ydl.extract_info(url, download=False)
+            if info:
+                print(f"⚠️ Couldn't extract direct URL, but yt-dlp can access the video")
+                # Return the original URL for yt-dlp to handle
+                return url
     except:
         pass
     
-    # Compression command
-    cmd = [
-        'ffmpeg',
-        '-i', input_file,
-        '-vf', 'scale=-2:240',
-        '-c:v', 'libx264',
-        '-crf', '28',
-        '-preset', 'veryfast',
-        '-c:a', 'aac',
-        '-b:a', '64k',
-        '-y',
-        output_file
-    ]
+    print("❌ All extraction methods failed")
+    return None
+
+def download_with_ytdlp(url, output_path):
+    """Download video using yt-dlp with minimum 240p quality"""
+    print("📥 Downloading with yt-dlp...")
     
     try:
-        start_time = time.time()
+        # Check if it's a direct video URL or needs extraction
+        is_direct_url = any(ext in url.lower() for ext in ['.mp4', '.m3u8', '.webm', '.avi', '.mkv'])
         
-        if duration > 0:
-            # With progress display
-            process = subprocess.Popen(
-                cmd,
-                stderr=subprocess.PIPE,
-                universal_newlines=True,
-                bufsize=1
-            )
+        if is_direct_url:
+            # Direct video URL, use ffmpeg to download
+            print("🔗 Direct video URL detected, using ffmpeg...")
+            cmd = [
+                'ffmpeg',
+                '-i', url,
+                '-c', 'copy',
+                '-bsf:a', 'aac_adtstoasc',
+                '-y',
+                output_path
+            ]
             
-            last_percent = 0
-            for line in process.stderr:
-                if 'time=' in line:
-                    try:
-                        time_str = line.split('time=')[1].split()[0]
-                        h, m, s = time_str.split(':')
-                        current_time = float(h) * 3600 + float(m) * 60 + float(s)
-                        percent = min(99, (current_time / duration) * 100)
-                        
-                        if percent - last_percent >= 1:  # Update every 1%
-                            elapsed = time.time() - start_time
-                            eta = (duration - current_time) * (elapsed / current_time) if current_time > 0 else 0
-                            print(f"🎬 Compressing: {percent:.1f}% | ETA: {eta:.0f}s", end='\r')
-                            last_percent = percent
-                    except:
-                        pass
+            print(f"🔄 Running: ffmpeg -i [URL] -c copy {output_path}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
             
-            process.wait()
-            returncode = process.returncode
-        else:
-            # Without progress
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            returncode = result.returncode
+            if result.returncode == 0 and os.path.exists(output_path):
+                file_size = os.path.getsize(output_path) / (1024 * 1024)
+                print(f"✅ Download complete: {file_size:.1f} MB")
+                return True
+            else:
+                print(f"❌ FFmpeg download failed, trying yt-dlp...")
         
-        if returncode == 0 and os.path.exists(output_file):
-            new_size = os.path.getsize(output_file) / (1024 * 1024)
-            elapsed = time.time() - start_time
-            reduction = ((original_size - new_size) / original_size) * 100
+        # Use yt-dlp for extraction + download
+        ydl_opts = {
+            'outtmpl': output_path,
+            'format': 'worst[height>=240][height<=360]/worst[height>=240]/worst',
+            'quiet': False,
+            'no_warnings': False,
+            'socket_timeout': 30,
+            'retries': 3,
+            'fragment_retries': 3,
+            'skip_unavailable_fragments': True,
+            'http_headers': HEADERS,
+            'extractor_args': {
+                'vk': ['--referer', 'https://vk.com/'],
+            }
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            print(f"🔗 Downloading from: {url[:100]}...")
+            info = ydl.extract_info(url, download=True)
             
-            print(f"\n✅ Compression completed in {elapsed:.1f}s")
-            print(f"📊 New size: {new_size:.1f}MB ({reduction:.1f}% reduction)")
-            print(f"📺 Resolution: 240p")
+            # Log the quality we downloaded
+            if info and 'height' in info and info['height']:
+                print(f"📊 Downloaded {info['height']}p quality")
+            
+        if os.path.exists(output_path):
+            file_size = os.path.getsize(output_path) / (1024 * 1024)
+            print(f"✅ Download complete: {file_size:.1f} MB")
             return True
         else:
-            print(f"❌ Compression failed")
+            print("❌ Download failed - file not created")
             return False
             
     except Exception as e:
-        print(f"❌ Compression error: {e}")
+        print(f"❌ yt-dlp download failed: {e}")
         return False
+
+def download_alternative(url, output_path):
+    """Alternative download method using requests"""
+    print("🔄 Using alternative download method...")
+    
+    try:
+        headers = HEADERS.copy()
+        response = requests.get(url, headers=headers, stream=True, timeout=30)
+        
+        if response.status_code != 200:
+            print(f"❌ HTTP {response.status_code}")
+            return False
+        
+        total_size = int(response.headers.get('content-length', 0))
+        
+        print(f"📥 Downloading {total_size / (1024*1024):.1f} MB...")
+        
+        with open(output_path, 'wb') as f:
+            downloaded = 0
+            start_time = time.time()
+            chunk_size = 8192
+            
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    
+                    # Update progress every 5MB
+                    if downloaded % (5 * 1024 * 1024) < chunk_size:
+                        elapsed = time.time() - start_time
+                        speed = downloaded / elapsed / 1024 if elapsed > 0 else 0
+                        
+                        downloaded_mb = downloaded / (1024 * 1024)
+                        print(f"📥 {downloaded_mb:.1f} MB - {speed:.0f} KB/s")
+        
+        elapsed = time.time() - start_time
+        final_size = os.path.getsize(output_path) / (1024 * 1024)
+        print(f"✅ Alternative download complete: {final_size:.1f} MB in {elapsed:.1f}s")
+        
+        return final_size > 1
+        
+    except Exception as e:
+        print(f"❌ Alternative download failed: {e}")
+        return False
+
+def compress_to_240p(input_path, output_path):
+    """Compress video to 240p with original settings"""
+    print("🎬 Compressing to 240p...")
+    
+    if not os.path.exists(input_path):
+        print("❌ Input file not found")
+        return False
+    
+    input_size = os.path.getsize(input_path) / (1024 * 1024)
+    print(f"📊 Input size: {input_size:.1f} MB")
+    
+    # Check if already 240p or lower
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', 
+               '-show_entries', 'stream=height', '-of', 'csv=p=0:nk=1', input_path]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            height = result.stdout.strip()
+            if height.isdigit() and int(height) <= 240:
+                print(f"📊 Video is already {height}p, copying without compression")
+                shutil.copy2(input_path, output_path)
+                return True
+    except:
+        pass
+    
+    # Compress using same settings as original script
+    cmd = [
+        'ffmpeg',
+        '-i', input_path,
+        '-vf', 'scale=-2:240',  # Scale to 240p height
+        '-c:v', 'libx264',
+        '-crf', '28',  # Same as original
+        '-preset', 'veryfast',  # Same as original
+        '-c:a', 'aac',
+        '-b:a', '64k',  # Same as original
+        '-y',
+        output_path
+    ]
+    
+    print("🔄 Starting compression...")
+    start_time = time.time()
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)  # 1 hour timeout
+    
+    elapsed = time.time() - start_time
+    
+    if result.returncode == 0 and os.path.exists(output_path):
+        output_size = os.path.getsize(output_path) / (1024 * 1024)
+        reduction = ((input_size - output_size) / input_size) * 100 if input_size > 0 else 0
+        
+        print(f"✅ Compression complete in {elapsed:.1f}s")
+        print(f"📊 Output size: {output_size:.1f} MB (-{reduction:.1f}%)")
+        
+        # Verify output file
+        if output_size < 1:  # Less than 1MB
+            print("⚠️ Output file too small, using input file")
+            shutil.copy2(input_path, output_path)
+        
+        return True
+    else:
+        print("❌ Compression failed, using original file")
+        if result.stderr:
+            print(f"Error: {result.stderr[:200]}")
+        shutil.copy2(input_path, output_path)
+        return True
 
 def create_thumbnail(input_file, thumbnail_path):
     """Create thumbnail from video"""
     try:
         print(f"🖼️ Creating thumbnail...")
         
-        # Try to get video duration first
-        duration = 0
-        try:
-            cmd = [
-                'ffprobe',
-                '-v', 'error',
-                '-show_entries', 'format=duration',
-                '-of', 'default=noprint_wrappers=1:nokey=1',
-                input_file
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                duration = float(result.stdout.strip())
-        except:
-            pass
-        
-        # Take thumbnail from 10% of video duration
-        if duration > 0:
-            thumbnail_time = duration * 0.1
-            hours = int(thumbnail_time // 3600)
-            minutes = int((thumbnail_time % 3600) // 60)
-            seconds = int(thumbnail_time % 60)
-            time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        else:
-            time_str = "00:05:00"  # Default 5 minutes
-        
         cmd = [
             'ffmpeg',
             '-i', input_file,
-            '-ss', time_str,
+            '-ss', '00:00:05',
             '-vframes', '1',
             '-s', '320x180',
             '-f', 'image2',
@@ -425,198 +774,332 @@ def create_thumbnail(input_file, thumbnail_path):
         print(f"❌ Thumbnail error: {e}")
         return False
 
-async def upload_video_with_progress(file_path, caption, thumbnail_path=None):
-    """Upload video to Telegram with progress"""
-    if not os.path.exists(file_path):
-        return False
+def get_video_dimensions(input_file):
+    """Get video dimensions"""
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'quiet',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height',
+            '-of', 'csv=p=0',
+            input_file
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            dimensions = result.stdout.strip().split(',')
+            if len(dimensions) == 2:
+                return int(dimensions[0]), int(dimensions[1])
+    except:
+        pass
     
-    file_size = os.path.getsize(file_path) / (1024 * 1024)
-    print(f"☁️ Preparing upload: {file_size:.1f}MB")
+    return 426, 240  # Default for 240p
+
+def get_video_duration(input_file):
+    """Get video duration in seconds"""
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            input_file
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return int(float(result.stdout.strip()))
+    except:
+        pass
+    
+    return 0
+
+async def upload_to_telegram(file_path, caption, thumbnail_path=None):
+    """Upload to Telegram channel with enhanced settings"""
+    print(f"☁️ Uploading: {os.path.basename(file_path)}")
+    
+    # Get file size
+    file_size = os.path.getsize(file_path) / (1024*1024)
+    print(f"📊 File size: {file_size:.1f} MB")
     
     try:
+        # Get video dimensions
+        width, height = get_video_dimensions(file_path)
+        
+        # Get duration
+        duration = get_video_duration(file_path)
+        
+        # Prepare upload parameters
         upload_params = {
             'chat_id': TELEGRAM_CHANNEL,
             'video': file_path,
             'caption': caption,
             'supports_streaming': True,
-            'parse_mode': 'HTML',
+            'width': width,
+            'height': height,
+            'duration': duration,
         }
         
+        # Add thumbnail if available
         if thumbnail_path and os.path.exists(thumbnail_path):
             upload_params['thumb'] = thumbnail_path
+            print(f"🖼️ Using thumbnail: {os.path.basename(thumbnail_path)}")
         
-        # Progress tracking
+        print(f"📐 Video dimensions: {width}x{height}")
+        print(f"⏱️ Duration: {duration} seconds")
+        print(f"🎬 Streaming: Enabled (pauses on exit)")
+        
+        # Upload with progress
         start_time = time.time()
-        last_update = [0]
+        last_percent = 0
         
         def progress(current, total):
-            current_time = time.time()
-            if current_time - last_update[0] > 1:  # Update every second
-                percent = (current / total) * 100
-                elapsed = current_time - start_time
-                speed = current / elapsed / 1024 if elapsed > 0 else 0  # KB/s
-                eta = (total - current) / (speed * 1024) if speed > 0 else 0
-                
-                print(f"📤 Uploading: {percent:.1f}% | Speed: {speed:.0f} KB/s | ETA: {eta:.0f}s", end='\r')
-                last_update[0] = current_time
+            nonlocal last_percent
+            percent = (current / total) * 100
+            if percent - last_percent >= 10 or percent == 100:
+                speed = current / (time.time() - start_time) / 1024 if (time.time() - start_time) > 0 else 0
+                print(f"📤 {percent:.0f}% - {speed:.0f} KB/s")
+                last_percent = percent
         
         upload_params['progress'] = progress
         
         await app.send_video(**upload_params)
         
         elapsed = time.time() - start_time
-        print(f"\n✅ Upload completed in {elapsed:.1f}s")
+        print(f"✅ Uploaded in {elapsed:.1f} seconds")
         return True
         
     except FloodWait as e:
-        print(f"\n⏳ Flood wait: {e.value}s")
+        print(f"⏳ Flood wait: {e.value} seconds")
         await asyncio.sleep(e.value)
-        return await upload_video_with_progress(file_path, caption, thumbnail_path)
+        return await upload_to_telegram(file_path, caption, thumbnail_path)
     except Exception as e:
-        print(f"\n❌ Upload failed: {e}")
-        return False
+        print(f"❌ Upload failed: {e}")
+        # Try without progress
+        try:
+            if 'progress' in upload_params:
+                upload_params.pop('progress')
+            await app.send_video(**upload_params)
+            print("✅ Upload successful (without progress)")
+            return True
+        except Exception as e2:
+            print(f"❌ Retry failed: {e2}")
+            return False
+
+async def process_movie(video_url, video_title):
+    """Process a single movie - download minimum 240p then compress"""
+    print(f"\n{'─'*50}")
+    print(f"🎬 Processing: {video_title}")
+    print(f"🎯 Strategy: Download minimum 240p → Compress to 240p")
+    print(f"⚠️  Note: Will ignore 144p if 240p or higher is available")
+    print(f"🔗 URL: {video_url}")
+    print(f"{'─'*50}")
+    
+    # Create temp directory
+    timestamp = datetime.now().strftime('%H%M%S')
+    temp_dir = f"temp_movie_{timestamp}"
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # Define file paths
+    temp_file = os.path.join(temp_dir, "temp_video.mp4")
+    final_file = os.path.join(temp_dir, "movie_240p.mp4")
+    thumbnail_file = os.path.join(temp_dir, "thumbnail.jpg")
+    
+    try:
+        # Step 1: Extract URL
+        print("1️⃣ Extracting video URL...")
+        direct_url = extract_video_url(video_url)
+        
+        if not direct_url:
+            print("❌ Failed to extract video URL")
+            return False, "URL extraction failed"
+        
+        print(f"✅ Found URL: {direct_url[:100]}...")
+        
+        # Step 2: Download
+        print("2️⃣ Downloading video...")
+        if not download_with_ytdlp(direct_url, temp_file):
+            # Try alternative method
+            print("🔄 Trying alternative download method...")
+            if not download_alternative(direct_url, temp_file):
+                return False, "Download failed"
+        
+        # Check downloaded file
+        if not os.path.exists(temp_file) or os.path.getsize(temp_file) < 1024:
+            return False, "Downloaded file is invalid"
+        
+        # Step 3: Check quality and compress to 240p if needed
+        print("3️⃣ Checking video quality...")
+        
+        try:
+            cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', 
+                   '-show_entries', 'stream=height', '-of', 'csv=p=0:nk=1', temp_file]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                height = result.stdout.strip()
+                if height.isdigit():
+                    print(f"📊 Downloaded video is {height}p")
+                    
+                    if int(height) <= 240:
+                        print(f"✅ Video is already {height}p or lower, no compression needed")
+                        final_file = temp_file
+                    else:
+                        print("🎬 Compressing to 240p...")
+                        if not compress_to_240p(temp_file, final_file):
+                            return False, "Compression failed"
+                else:
+                    print("⚠️ Could not determine video height, trying compression...")
+                    if not compress_to_240p(temp_file, final_file):
+                        return False, "Compression failed"
+            else:
+                print("⚠️ Could not check video height, trying compression...")
+                if not compress_to_240p(temp_file, final_file):
+                    return False, "Compression failed"
+        except:
+            print("⚠️ Error checking video quality, trying compression...")
+            if not compress_to_240p(temp_file, final_file):
+                return False, "Compression failed"
+        
+        # Verify final file
+        if not os.path.exists(final_file) or os.path.getsize(final_file) < 1024:
+            print("⚠️ Final file issue, using temp file")
+            final_file = temp_file
+        
+        # Step 4: Create thumbnail
+        print("4️⃣ Creating thumbnail...")
+        thumbnail_created = create_thumbnail(final_file, thumbnail_file)
+        
+        # Step 5: Upload
+        print("5️⃣ Uploading to Telegram...")
+        thumb = thumbnail_file if thumbnail_created and os.path.exists(thumbnail_file) else None
+        
+        if not await upload_to_telegram(final_file, video_title, thumb):
+            return False, "Upload failed"
+        
+        # Cleanup
+        try:
+            shutil.rmtree(temp_dir)
+            print("🗑️ Cleaned temp files")
+        except:
+            pass
+            
+        return True, "✅ Movie processed successfully"
+        
+    except Exception as e:
+        # Cleanup on error
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except:
+            pass
+        return False, f"Error: {str(e)}"
 
 async def main():
-    print("="*60)
-    print("🎬 TELEGRAM MOVIE UPLOADER v2.0")
-    print("="*60)
-    print("📺 Resolution: 240p | 🛡️ Cloudscraper Enabled")
-    print("="*60)
+    """Main function"""
+    print("="*50)
+    print("🎬 Movie Uploader v4.0")
+    print("🎯 Strategy: Download Minimum 240p → Compress to 240p")
+    print("🌐 Enhanced URL extraction for multiple sites")
+    print("="*50)
     
-    # Install system dependencies
-    print("\n🔧 Checking system dependencies...")
+    # Check ffmpeg
     try:
         subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-        print("✅ ffmpeg is available")
+        print("✅ ffmpeg is installed")
     except:
-        print("📦 Installing ffmpeg...")
-        subprocess.run(['sudo', 'apt-get', 'update', '-y'], capture_output=True)
+        print("❌ ffmpeg not found, installing...")
         subprocess.run(['sudo', 'apt-get', 'install', '-y', 'ffmpeg'], capture_output=True)
-        print("✅ ffmpeg installed")
     
     # Setup Telegram
     if not await setup_telegram():
+        print("❌ Cannot continue without Telegram")
+        return
+    
+    # Check config
+    config_file = "video_config.json"
+    if not os.path.exists(config_file):
+        print("❌ Config file not found, creating sample...")
+        sample_config = {
+            "videos": [
+                {
+                    "url": "https://vk.com/video_ext.php?oid=791768803&id=456250107",
+                    "title": "فيلم تجريبي - النسخة الطويلة"
+                },
+                {
+                    "url": "https://vk.com/video791768803_456250107",
+                    "title": "فيلم تجريبي - النسخة القصيرة"
+                }
+            ]
+        }
+        with open(config_file, 'w', encoding='utf-8') as f:
+            json.dump(sample_config, f, ensure_ascii=False, indent=2)
+        print("⚠️ Please edit video_config.json and run again")
         return
     
     # Load config
-    config_file = "movie_config.json"
-    if not os.path.exists(config_file):
-        print(f"❌ Config file not found")
-        return
-    
-    with open(config_file, 'r', encoding='utf-8') as f:
-        config = json.load(f)
-    
-    video_url = config.get("watch_url", "").strip()
-    movie_name_arabic = config.get("movie_name_arabic", "").strip()
-    movie_name_english = config.get("movie_name_english", "").strip()
-    
-    if not video_url:
-        print("❌ Video URL is required")
-        return
-    
-    if not movie_name_arabic:
-        print("❌ Arabic movie name is required")
-        return
-    
-    print(f"\n📽️ Movie: {movie_name_arabic}")
-    if movie_name_english:
-        print(f"🌐 English: {movie_name_english}")
-    print(f"🔗 Source: {video_url[:100]}...")
-    print(f"📺 Target: 240p")
-    
-    # Create working directory
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    work_dir = f"work_{timestamp}"
-    os.makedirs(work_dir, exist_ok=True)
-    
-    original_file = os.path.join(work_dir, "original.mp4")
-    compressed_file = os.path.join(work_dir, "compressed_240p.mp4")
-    thumbnail_file = os.path.join(work_dir, "thumbnail.jpg")
-    
     try:
-        # Step 1: Try to bypass protection
-        print(f"\n" + "="*60)
-        print("🛡️ STEP 1: BYPASSING PROTECTION")
-        print("="*60)
-        
-        if not download_with_cloudscraper(video_url, original_file):
-            print("⚠️ Cloudscraper failed, trying direct download...")
-        
-        # Step 2: Download video
-        print(f"\n" + "="*60)
-        print("📥 STEP 2: DOWNLOADING VIDEO")
-        print("="*60)
-        
-        if not download_video_with_ytdlp(video_url, original_file):
-            print("❌ Download failed after all attempts")
-            return
-        
-        # Step 3: Create thumbnail
-        print(f"\n" + "="*60)
-        print("🖼️ STEP 3: CREATING THUMBNAIL")
-        print("="*60)
-        
-        create_thumbnail(original_file, thumbnail_file)
-        
-        # Step 4: Compress to 240p
-        print(f"\n" + "="*60)
-        print("🎬 STEP 4: COMPRESSING TO 240p")
-        print("="*60)
-        
-        if not compress_to_240p_with_progress(original_file, compressed_file):
-            print("⚠️ Compression failed, using original")
-            compressed_file = original_file
-        
-        # Step 5: Upload
-        print(f"\n" + "="*60)
-        print("☁️ STEP 5: UPLOADING TO TELEGRAM")
-        print("="*60)
-        
-        caption = f"<b>{movie_name_arabic}</b>"
-        if movie_name_english:
-            caption += f"\n<code>{movie_name_english}</code>"
-        
-        thumb = thumbnail_file if os.path.exists(thumbnail_file) else None
-        
-        if await upload_video_with_progress(compressed_file, caption, thumb):
-            print(f"\n" + "="*60)
-            print("✅ SUCCESS: MOVIE UPLOADED SUCCESSFULLY!")
-            print("="*60)
-            print(f"🎬 Movie: {movie_name_arabic}")
-            print(f"📺 Quality: 240p")
-            print(f"📢 Channel: {TELEGRAM_CHANNEL}")
-            print(f"⏰ Completed at: {datetime.now().strftime('%H:%M:%S')}")
-            print("="*60)
-        else:
-            print(f"\n" + "="*60)
-            print("❌ FAILED: UPLOAD UNSUCCESSFUL")
-            print("="*60)
-            
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
     except Exception as e:
-        print(f"\n" + "="*60)
-        print("💥 ERROR OCCURRED")
-        print("="*60)
-        print(f"Error: {e}")
-        
-    finally:
-        # Cleanup
-        try:
-            if os.path.exists(work_dir):
-                shutil.rmtree(work_dir)
-                print(f"\n🗑️ Cleaned working directory")
-        except:
-            pass
+        print(f"❌ Error reading config: {e}")
+        return
     
+    videos = config.get("videos", [])
+    if not videos:
+        print("❌ No videos in config")
+        return
+    
+    print(f"\n📊 Found {len(videos)} video(s) to process")
+    
+    # Process videos
+    successful = 0
+    for index, video in enumerate(videos, 1):
+        url = video.get("url", "").strip()
+        title = video.get("title", "").strip()
+        
+        if not url or not title:
+            print(f"⚠️ Skipping video {index}: Missing data")
+            continue
+        
+        print(f"\n[🎬 Video {index}/{len(videos)}] {title}")
+        success, message = await process_movie(url, title)
+        
+        if success:
+            successful += 1
+            print(f"✅ {message}")
+        else:
+            print(f"❌ {message}")
+        
+        # Wait between videos
+        if index < len(videos):
+            print("⏳ Waiting 5 seconds before next video...")
+            await asyncio.sleep(5)
+    
+    # Summary
+    print(f"\n{'='*50}")
+    print(f"📊 Result: {successful}/{len(videos)} successful")
+    
+    if successful == len(videos):
+        print("🎉 All videos processed successfully!")
+    elif successful > 0:
+        print(f"⚠️ Partially successful ({successful}/{len(videos)})")
+    else:
+        print("💥 All videos failed!")
+    
+    print("🏁 Processing complete")
+    
+    # Cleanup
     if app:
         await app.stop()
-        print("🔌 Telegram connection closed")
+        print("🔌 Disconnected from Telegram")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n\n⏹️ Process stopped by user")
+        print("\n⏹️ Stopped by user")
     except Exception as e:
-        print(f"\n💥 Fatal error: {e}")
+        print(f"\n💥 Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
