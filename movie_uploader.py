@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Telegram Movie Downloader & Uploader
+Telegram Movie Downloader & Uploader - Enhanced Version
 """
 
 import os
@@ -21,7 +21,6 @@ TELEGRAM_API_HASH = os.environ.get("API_HASH", "")
 TELEGRAM_CHANNEL = os.environ.get("CHANNEL", "")
 STRING_SESSION = os.environ.get("STRING_SESSION", "")
 
-# Validate environment variables
 def validate_env():
     errors = []
     
@@ -52,10 +51,22 @@ if not validate_env():
 
 TELEGRAM_API_ID = int(TELEGRAM_API_ID)
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+# Improved headers to bypass 403 errors
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 HEADERS = {
     'User-Agent': USER_AGENT,
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
 }
 
 # ===== INSTALL REQUIREMENTS =====
@@ -69,6 +80,7 @@ def install_requirements():
         "requests>=2.31.0",
         "beautifulsoup4>=4.12.0",
         "lxml>=4.9.0",
+        "cloudscraper>=1.2.71",
     ]
     
     for req in requirements:
@@ -85,6 +97,7 @@ install_requirements()
 from pyrogram import Client
 from pyrogram.errors import FloodWait
 import yt_dlp
+import cloudscraper
 from bs4 import BeautifulSoup
 
 app = None
@@ -124,21 +137,137 @@ async def setup_telegram():
         print(f"❌ Telegram setup failed: {e}")
         return False
 
-# ===== VIDEO EXTRACTION =====
+# ===== VIDEO EXTRACTION WITH CLOUDSCRAPER =====
 def extract_video_url(watch_url):
-    """Extract video URL from watch URL"""
+    """Extract video URL using cloudscraper to bypass protection"""
     print(f"🔗 Extracting video from: {watch_url}")
     
-    # Try multiple methods
+    # Initialize cloudscraper
+    scraper = cloudscraper.create_scraper()
     
-    # Method 1: Try yt-dlp
-    print("🔄 Method 1: Trying yt-dlp...")
+    # Method 1: Try to find direct video URL with cloudscraper
+    print("🔄 Method 1: Using cloudscraper to bypass protection...")
+    try:
+        # Get the page content
+        response = scraper.get(watch_url, headers=HEADERS, timeout=30)
+        
+        if response.status_code != 200:
+            print(f"⚠️ HTTP {response.status_code} from cloudscraper")
+        else:
+            # Parse HTML
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Look for video sources
+            video_sources = []
+            
+            # Check video tags
+            for video in soup.find_all('video'):
+                src = video.get('src')
+                if src:
+                    if src.startswith('//'):
+                        src = 'https:' + src
+                    elif src.startswith('/'):
+                        parsed = urlparse(watch_url)
+                        src = f'{parsed.scheme}://{parsed.netloc}{src}'
+                    video_sources.append(src)
+                    print(f"🎬 Found video src: {src[:100]}...")
+                
+                # Check source tags inside video
+                for source in video.find_all('source'):
+                    src = source.get('src')
+                    if src:
+                        if src.startswith('//'):
+                            src = 'https:' + src
+                        elif src.startswith('/'):
+                            parsed = urlparse(watch_url)
+                            src = f'{parsed.scheme}://{parsed.netloc}{src}'
+                        video_sources.append(src)
+                        print(f"🎬 Found source src: {src[:100]}...")
+            
+            # Check for iframes
+            for iframe in soup.find_all('iframe'):
+                src = iframe.get('src')
+                if src and ('video' in src.lower() or 'embed' in src.lower()):
+                    print(f"📺 Found iframe: {src}")
+                    # Try to follow iframe
+                    try:
+                        iframe_response = scraper.get(src, headers=HEADERS, timeout=15)
+                        iframe_soup = BeautifulSoup(iframe_response.text, 'html.parser')
+                        
+                        # Look for video in iframe
+                        for iframe_video in iframe_soup.find_all('video'):
+                            iframe_src = iframe_video.get('src')
+                            if iframe_src:
+                                video_sources.append(iframe_src)
+                                print(f"🎬 Found video in iframe: {iframe_src[:100]}...")
+                    except:
+                        pass
+            
+            # Check for JavaScript variables with video URLs
+            script_patterns = [
+                r'file["\']?\s*[:=]\s*["\']([^"\']+\.mp4[^"\']*)["\']',
+                r'src["\']?\s*[:=]\s*["\']([^"\']+\.mp4[^"\']*)["\']',
+                r'video["\']?\s*[:=]\s*["\']([^"\']+\.mp4[^"\']*)["\']',
+                r'url["\']?\s*[:=]\s*["\']([^"\']+\.mp4[^"\']*)["\']',
+                r'"(https?://[^"]+\.m3u8[^"]*)"',
+            ]
+            
+            for script in soup.find_all('script'):
+                if script.string:
+                    for pattern in script_patterns:
+                        matches = re.findall(pattern, script.string, re.IGNORECASE)
+                        for url in matches:
+                            url = url.replace('\\/', '/')
+                            if url.startswith('http'):
+                                video_sources.append(url)
+                                print(f"🎬 Found URL in script: {url[:100]}...")
+                            elif url.startswith('//'):
+                                video_sources.append('https:' + url)
+                                print(f"🎬 Found URL in script: https:{url[:100]}...")
+            
+            # Filter unique sources
+            unique_sources = []
+            for src in video_sources:
+                if src and src not in unique_sources:
+                    unique_sources.append(src)
+            
+            if unique_sources:
+                # Return the best source (prefer mp4)
+                for src in unique_sources:
+                    if '.mp4' in src.lower():
+                        return src, "✅ Found MP4 URL via cloudscraper"
+                return unique_sources[0], "✅ Found video URL via cloudscraper"
+    except Exception as e:
+        print(f"⚠️ Cloudscraper method failed: {e}")
+    
+    # Method 2: Try yt-dlp with cloudscraper cookies
+    print("🔄 Method 2: Trying yt-dlp with custom settings...")
     try:
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
             'user_agent': USER_AGENT,
+            'referer': watch_url,
+            'http_headers': HEADERS,
+            'extractor_args': {
+                'generic': {'player_skip': ['all']}
+            }
         }
+        
+        # Try to use cookies from cloudscraper
+        try:
+            session = scraper
+            # Try to get cookies
+            if hasattr(session, 'cookies'):
+                ydl_opts['cookiefile'] = 'cookies.txt'
+                # Save cookies temporarily
+                import http.cookiejar
+                jar = http.cookiejar.MozillaCookieJar('cookies.txt')
+                for cookie in session.cookies:
+                    jar.set_cookie(cookie)
+                jar.save()
+        except:
+            pass
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(watch_url, download=False)
@@ -148,7 +277,6 @@ def extract_video_url(watch_url):
             
             if 'formats' in info:
                 formats = info['formats']
-                # Filter video formats
                 video_formats = [f for f in formats if f.get('vcodec') != 'none']
                 if video_formats:
                     # Try to find MP4 first
@@ -163,64 +291,43 @@ def extract_video_url(watch_url):
     except Exception as e:
         print(f"⚠️ yt-dlp extraction failed: {e}")
     
-    # Method 2: Try direct HTML parsing
-    print("🔄 Method 2: Trying direct HTML parsing...")
+    # Method 3: Try alternative approach for specific sites
+    print("🔄 Method 3: Trying alternative approach...")
     try:
-        response = requests.get(watch_url, headers=HEADERS, timeout=30)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
+        # For embed sites, try to find the actual video file
+        if 'embed' in watch_url.lower():
+            # Try to extract video ID and construct direct URL
+            patterns = [
+                r'embed-([a-zA-Z0-9]+)',
+                r'embed/([a-zA-Z0-9]+)',
+                r'e/([a-zA-Z0-9]+)',
+            ]
             
-            # Look for video tags
-            video_tags = soup.find_all('video')
-            for video in video_tags:
-                src = video.get('src')
-                if src:
-                    # Make absolute URL if relative
-                    if src.startswith('//'):
-                        src = 'https:' + src
-                    elif src.startswith('/'):
-                        parsed = urlparse(watch_url)
-                        src = f'{parsed.scheme}://{parsed.netloc}{src}'
-                    return src, "✅ Found video tag"
-            
-            # Look for source tags inside video
-            for video in video_tags:
-                sources = video.find_all('source')
-                for source in sources:
-                    src = source.get('src')
-                    if src:
-                        if src.startswith('//'):
-                            src = 'https:' + src
-                        elif src.startswith('/'):
-                            parsed = urlparse(watch_url)
-                            src = f'{parsed.scheme}://{parsed.netloc}{src}'
-                        return src, "✅ Found source tag"
-            
-            # Look for iframes
-            iframes = soup.find_all('iframe')
-            for iframe in iframes:
-                src = iframe.get('src')
-                if src and 'video' in src.lower():
-                    # Try to extract from iframe
-                    try:
-                        iframe_response = requests.get(src, headers=HEADERS, timeout=15)
-                        iframe_soup = BeautifulSoup(iframe_response.text, 'html.parser')
-                        
-                        # Look for video in iframe
-                        iframe_videos = iframe_soup.find_all('video')
-                        for iframe_video in iframe_videos:
-                            iframe_src = iframe_video.get('src')
-                            if iframe_src:
-                                return iframe_src, "✅ Found URL in iframe"
-                    except:
-                        pass
+            for pattern in patterns:
+                match = re.search(pattern, watch_url)
+                if match:
+                    video_id = match.group(1)
+                    # Try common video hosting patterns
+                    possible_urls = [
+                        f"https://{urlparse(watch_url).netloc.replace('embed', 'video')}/{video_id}.mp4",
+                        f"https://{urlparse(watch_url).netloc}/videos/{video_id}.mp4",
+                        f"https://{urlparse(watch_url).netloc}/files/{video_id}.mp4",
+                    ]
+                    
+                    for test_url in possible_urls:
+                        try:
+                            response = scraper.head(test_url, headers=HEADERS, timeout=10)
+                            if response.status_code == 200:
+                                return test_url, "✅ Found direct video URL"
+                        except:
+                            pass
     except Exception as e:
-        print(f"⚠️ HTML parsing failed: {e}")
+        print(f"⚠️ Alternative approach failed: {e}")
     
     return None, "❌ Could not extract video URL"
 
 def download_video(url, output_path):
-    """Download video using yt-dlp"""
+    """Download video using yt-dlp with improved settings"""
     try:
         ydl_opts = {
             'format': 'best[height<=720]/best',
@@ -228,10 +335,13 @@ def download_video(url, output_path):
             'quiet': True,
             'no_warnings': True,
             'user_agent': USER_AGENT,
+            'referer': url,
+            'http_headers': HEADERS,
             'retries': 10,
             'fragment_retries': 10,
             'skip_unavailable_fragments': True,
             'socket_timeout': 30,
+            'concurrent_fragment_downloads': 3,
         }
         
         print(f"📥 Downloading: {url[:100]}...")
@@ -262,8 +372,36 @@ def download_video(url, output_path):
         
     except Exception as e:
         print(f"❌ Download failed: {e}")
+        
+        # Try direct download as fallback
+        print("🔄 Trying direct download with cloudscraper...")
+        try:
+            scraper = cloudscraper.create_scraper()
+            response = scraper.get(url, headers=HEADERS, stream=True, timeout=60)
+            
+            if response.status_code == 200:
+                with open(output_path, 'wb') as f:
+                    total_size = int(response.headers.get('content-length', 0))
+                    downloaded = 0
+                    start = time.time()
+                    
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                    
+                elapsed = time.time() - start
+                
+                if os.path.exists(output_path):
+                    size = os.path.getsize(output_path) / (1024*1024)
+                    print(f"✅ Direct download completed in {elapsed:.1f}s ({size:.1f}MB)")
+                    return True
+        except Exception as e2:
+            print(f"❌ Direct download failed: {e2}")
+        
         return False
 
+# باقي الدوال تبقى كما هي مع تعديلات بسيطة
 def compress_video(input_file, output_file):
     """Compress video to 720p"""
     if not os.path.exists(input_file):
@@ -450,7 +588,7 @@ async def process_movie(watch_url, movie_name_arabic, movie_name_english, downlo
 async def main():
     """Main function"""
     print("="*50)
-    print("🎬 Telegram Movie Uploader")
+    print("🎬 Telegram Movie Uploader (Enhanced)")
     print("="*50)
     
     # Check dependencies
