@@ -13,7 +13,7 @@ import subprocess
 import shutil
 import asyncio
 from datetime import datetime
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
 
 # ===== CONFIGURATION =====
 # Get from GitHub Secrets
@@ -55,16 +55,19 @@ if not validate_env():
 
 TELEGRAM_API_ID = int(TELEGRAM_API_ID)
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 HEADERS = {
     'User-Agent': USER_AGENT,
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Accept-Encoding': 'gzip, deflate',
+    'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
     'DNT': '1',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
-    'Referer': 'https://3seq.com/'
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
 }
 
 # ===== IMPORTS =====
@@ -118,7 +121,6 @@ async def setup_telegram():
     print(f"🔗 Session length: {len(STRING_SESSION)} characters")
     
     try:
-        # تنظيف STRING_SESSION من أي مسافات أو أسطر إضافية
         cleaned_session = STRING_SESSION.strip()
         
         print(f"🔧 Creating client with cleaned session ({len(cleaned_session)} chars)...")
@@ -135,32 +137,18 @@ async def setup_telegram():
         )
         
         print("🔌 Connecting to Telegram...")
-        
-        # بدء العميل
         await app.start()
         
-        # التحقق من الاتصال
         me = await app.get_me()
         print(f"✅ Connected as: {me.first_name} (@{me.username})")
         
-        # التحقق من القناة
         try:
             chat = await app.get_chat(TELEGRAM_CHANNEL)
             print(f"📢 Channel found: {chat.title}")
             
-            # التحقق من الصلاحيات
             try:
                 member = await app.get_chat_member(TELEGRAM_CHANNEL, me.id)
                 print(f"👤 Role: {member.status}")
-                
-                if hasattr(member.status, 'value'):
-                    role = member.status.value
-                else:
-                    role = str(member.status)
-                
-                if role not in ["creator", "administrator", "member", "owner"]:
-                    print("⚠️ Warning: You may not have upload permissions")
-                    
             except:
                 print("⚠️ Warning: Cannot check channel permissions")
                 
@@ -168,10 +156,6 @@ async def setup_telegram():
             
         except Exception as e:
             print(f"❌ Cannot access channel: {e}")
-            print("⚠️ Make sure:")
-            print("  1. The channel exists")
-            print("  2. Your account is a member")
-            print("  3. You have permission to send messages")
             return False
             
     except AuthKeyUnregistered:
@@ -187,24 +171,192 @@ async def setup_telegram():
         print(f"📝 Error details: {str(e)[:100]}")
         return False
 
-# ===== VIDEO PROCESSING FUNCTIONS =====
+# ===== VK SPECIFIC FUNCTIONS =====
+
+def extract_vk_video_url(vk_url):
+    """Extract VK video URL using multiple methods"""
+    print(f"🔗 Processing VK URL: {vk_url}")
+    
+    try:
+        # Parse VK URL parameters
+        parsed = urlparse(vk_url)
+        params = parse_qs(parsed.query)
+        
+        oid = params.get('oid', [''])[0]
+        video_id = params.get('id', [''])[0]
+        
+        if not oid or not video_id:
+            return None, "❌ Invalid VK URL format"
+        
+        print(f"📊 VK Video ID: {video_id}, Owner ID: {oid}")
+        
+        # Method 1: Try yt-dlp with custom extractor
+        print("🔄 Method 1: Trying yt-dlp with custom headers...")
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'user_agent': USER_AGENT,
+                'referer': 'https://vk.com/',
+                'http_headers': HEADERS,
+                'extractor_args': {
+                    'vk': {
+                        'player_skip': ['all'],
+                        'player_external': True,
+                    }
+                }
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(vk_url, download=False)
+                if 'url' in info:
+                    return info['url'], "✅ URL extracted via yt-dlp"
+                
+                # Try alternative formats
+                if 'formats' in info:
+                    formats = sorted(info['formats'], key=lambda x: x.get('height', 0), reverse=True)
+                    for fmt in formats:
+                        if fmt.get('url'):
+                            return fmt['url'], f"✅ URL found (format: {fmt.get('height', 'N/A')}p)"
+        except Exception as e:
+            print(f"⚠️ yt-dlp method failed: {e}")
+        
+        # Method 2: Direct VK API approach
+        print("🔄 Method 2: Trying direct VK API...")
+        try:
+            # Build VK player URL
+            player_url = f"https://vk.com/video{oid}_{video_id}"
+            
+            scraper = cloudscraper.create_scraper()
+            response = scraper.get(player_url, headers=HEADERS, timeout=30)
+            
+            if response.status_code == 200:
+                # Look for video URLs in the response
+                patterns = [
+                    r'"url([0-9]+?)":"([^"]+)"',
+                    r'"hls":"([^"]+)"',
+                    r'"src":"([^"]+)"',
+                    r'video-src="([^"]+)"',
+                    r'<source src="([^"]+)"',
+                ]
+                
+                for pattern in patterns:
+                    matches = re.findall(pattern, response.text)
+                    for match in matches:
+                        if isinstance(match, tuple):
+                            url = match[1]
+                        else:
+                            url = match
+                        
+                        # Decode URL if needed
+                        url = url.replace('\\/', '/')
+                        
+                        if url.startswith('http'):
+                            # Prefer mp4 URLs
+                            if 'mp4' in url.lower():
+                                return url, "✅ Found MP4 URL via VK API"
+                            return url, "✅ Found video URL via VK API"
+        except Exception as e:
+            print(f"⚠️ VK API method failed: {e}")
+        
+        # Method 3: Alternative extraction using regex
+        print("🔄 Method 3: Trying regex extraction...")
+        try:
+            # Try to extract from embed page
+            embed_url = f"https://vk.com/video_ext.php?oid={oid}&id={video_id}&hash="
+            
+            scraper = cloudscraper.create_scraper()
+            response = scraper.get(embed_url, headers=HEADERS, timeout=30)
+            
+            if response.status_code == 200:
+                # Look for video URLs
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Check for video tags
+                video_tags = soup.find_all('video')
+                for video in video_tags:
+                    src = video.get('src')
+                    if src:
+                        return src, "✅ Found video tag URL"
+                    
+                    # Check source tags inside video
+                    sources = video.find_all('source')
+                    for source in sources:
+                        src = source.get('src')
+                        if src:
+                            return src, "✅ Found source tag URL"
+                
+                # Look for iframes
+                iframes = soup.find_all('iframe')
+                for iframe in iframes:
+                    src = iframe.get('src')
+                    if src and 'video' in src:
+                        # Try to follow the iframe
+                        try:
+                            iframe_response = scraper.get(src, headers=HEADERS, timeout=15)
+                            iframe_soup = BeautifulSoup(iframe_response.text, 'html.parser')
+                            
+                            # Look for video in iframe
+                            iframe_videos = iframe_soup.find_all('video')
+                            for iframe_video in iframe_videos:
+                                iframe_src = iframe_video.get('src')
+                                if iframe_src:
+                                    return iframe_src, "✅ Found URL in iframe"
+                        except:
+                            pass
+        except Exception as e:
+            print(f"⚠️ Regex extraction failed: {e}")
+        
+        # Method 4: Try alternative services
+        print("🔄 Method 4: Trying alternative services...")
+        try:
+            # Try to use savefrom.net service
+            savefrom_url = f"https://en.savefrom.net/#url={vk_url}"
+            
+            scraper = cloudscraper.create_scraper()
+            response = scraper.get(savefrom_url, headers=HEADERS, timeout=30)
+            
+            if response.status_code == 200:
+                # Look for download links
+                download_patterns = [
+                    r'href="(https?://[^"]+\.mp4[^"]*)"',
+                    r'download_url":"([^"]+)"',
+                    r'"url":"([^"]+)"',
+                ]
+                
+                for pattern in download_patterns:
+                    matches = re.findall(pattern, response.text)
+                    for url in matches:
+                        if 'mp4' in url.lower():
+                            return url, "✅ Found MP4 URL via savefrom.net"
+                        if 'video' in url.lower():
+                            return url, "✅ Found video URL via savefrom.net"
+        except Exception as e:
+            print(f"⚠️ Alternative services failed: {e}")
+        
+        return None, "❌ Could not extract VK video URL"
+        
+    except Exception as e:
+        return None, f"❌ VK extraction error: {str(e)}"
 
 def extract_video_url_from_watch_url(watch_url):
-    """Extract video download URL from watch URL using network analysis approach"""
+    """Extract video download URL from watch URL"""
     try:
         print(f"🔗 Analyzing URL: {watch_url}")
         
-        # Initialize cloudscraper to bypass Cloudflare
-        scraper = cloudscraper.create_scraper()
+        # Check if it's a VK URL
+        if 'vk.com' in watch_url or 'video_ext.php' in watch_url:
+            return extract_vk_video_url(watch_url)
         
-        # Get initial page
+        # For non-VK URLs, use the original method
+        scraper = cloudscraper.create_scraper()
         response = scraper.get(watch_url, headers=HEADERS, timeout=30)
         if response.status_code != 200:
             return None, f"HTTP {response.status_code}"
         
         soup = BeautifulSoup(response.text, 'lxml')
         
-        # Strategy 1: Look for direct video sources
+        # Look for video sources
         video_sources = []
         
         # Find video tags
@@ -214,16 +366,14 @@ def extract_video_url_from_watch_url(watch_url):
                 if src and ('mp4' in src or 'm3u8' in src or 'mkv' in src):
                     video_sources.append(src)
         
-        # Find iframes with video sources
+        # Find iframes
         for iframe in soup.find_all('iframe'):
             src = iframe.get('src')
             if src and ('youtube' not in src and 'vimeo' not in src):
-                # Try to extract from iframe
                 try:
                     iframe_response = scraper.get(src, headers=HEADERS, timeout=15)
                     iframe_soup = BeautifulSoup(iframe_response.text, 'lxml')
                     
-                    # Look for video sources in iframe
                     for iframe_video in iframe_soup.find_all('video'):
                         for iframe_source in iframe_video.find_all('source'):
                             iframe_src = iframe_source.get('src')
@@ -232,13 +382,12 @@ def extract_video_url_from_watch_url(watch_url):
                 except:
                     pass
         
-        # Strategy 2: Look for JavaScript variables containing video URLs
+        # Look for JavaScript variables
         script_patterns = [
             r'file["\']?\s*[:=]\s*["\']([^"\']+\.(?:mp4|mkv|webm|avi|m3u8))["\']',
             r'source["\']?\s*[:=]\s*["\']([^"\']+\.(?:mp4|mkv|webm|avi|m3u8))["\']',
             r'video["\']?\s*[:=]\s*["\']([^"\']+\.(?:mp4|mkv|webm|avi|m3u8))["\']',
             r'url["\']?\s*[:=]\s*["\']([^"\']+\.(?:mp4|mkv|webm|avi|m3u8))["\']',
-            r'src["\']?\s*[:=]\s*["\']([^"\']+\.(?:mp4|mkv|webm|avi|m3u8))["\']',
         ]
         
         for script in soup.find_all('script'):
@@ -254,14 +403,11 @@ def extract_video_url_from_watch_url(watch_url):
                             parsed_url = urlparse(watch_url)
                             video_sources.append(f'{parsed_url.scheme}://{parsed_url.netloc}{match}')
         
-        # Filter and prioritize video sources
-        valid_sources = []
-        for src in video_sources:
-            if src.startswith('http'):
-                valid_sources.append(src)
+        # Filter valid sources
+        valid_sources = [src for src in video_sources if src.startswith('http')]
         
         if valid_sources:
-            # Sort by quality indicators
+            # Sort by quality
             def quality_score(url):
                 score = 0
                 url_lower = url.lower()
@@ -279,18 +425,22 @@ def extract_video_url_from_watch_url(watch_url):
             
             best_source = max(valid_sources, key=quality_score)
             print(f"✅ Found {len(valid_sources)} video sources")
-            print(f"📊 Best source: {best_source[:100]}...")
             return best_source, "✅ Video URL extracted"
         
-        # Strategy 3: Try yt-dlp as fallback
+        # Try yt-dlp as fallback
+        print("🔄 Trying yt-dlp extraction...")
         try:
-            print("🔄 Trying yt-dlp extraction...")
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
                 'user_agent': USER_AGENT,
                 'referer': watch_url,
                 'http_headers': HEADERS,
+                'extractor_args': {
+                    'generic': {
+                        'player_skip': ['all'],
+                    }
+                }
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -298,11 +448,10 @@ def extract_video_url_from_watch_url(watch_url):
                 if 'url' in info:
                     return info['url'], "✅ URL extracted via yt-dlp"
                 elif 'formats' in info:
-                    formats = info['formats']
-                    video_formats = [f for f in formats if f.get('vcodec') != 'none']
-                    if video_formats:
-                        best_format = max(video_formats, key=lambda x: x.get('height', 0))
-                        return best_format['url'], "✅ URL extracted via yt-dlp formats"
+                    formats = sorted(info['formats'], key=lambda x: x.get('height', 0), reverse=True)
+                    for fmt in formats:
+                        if fmt.get('url'):
+                            return fmt['url'], f"✅ URL found (format: {fmt.get('height', 'N/A')}p)"
         except Exception as e:
             print(f"⚠️ yt-dlp extraction failed: {e}")
         
@@ -312,7 +461,7 @@ def extract_video_url_from_watch_url(watch_url):
         return None, f"❌ Error: {str(e)}"
 
 def download_video(url, output_path):
-    """Download video using yt-dlp"""
+    """Download video using yt-dlp with VK support"""
     try:
         ydl_opts = {
             'format': 'best[height<=720]/best',
@@ -320,7 +469,7 @@ def download_video(url, output_path):
             'quiet': True,
             'no_warnings': True,
             'user_agent': USER_AGENT,
-            'referer': url,
+            'referer': 'https://vk.com/' if 'vk.com' in url else url,
             'http_headers': HEADERS,
             'retries': 10,
             'fragment_retries': 10,
@@ -329,7 +478,16 @@ def download_video(url, output_path):
             'concurrent_fragment_downloads': 3,
         }
         
-        print(f"📥 Downloading...")
+        # Special options for VK
+        if 'vk.com' in url or 'video_ext.php' in url:
+            ydl_opts['extractor_args'] = {
+                'vk': {
+                    'player_skip': ['all'],
+                    'player_external': True,
+                }
+            }
+        
+        print(f"📥 Downloading from: {url[:100]}...")
         start = time.time()
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -342,20 +500,48 @@ def download_video(url, output_path):
             print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
             return True
         
-        # Try different extensions
+        # Try alternative extensions
         base = os.path.splitext(output_path)[0]
-        for ext in ['.mp4', '.mkv', '.webm', '.avi']:
+        for ext in ['.mp4', '.mkv', '.webm', '.avi', '.flv']:
             alt_file = base + ext
             if os.path.exists(alt_file):
                 shutil.move(alt_file, output_path)
                 size = os.path.getsize(output_path) / (1024*1024)
-                print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
+                print(f"✅ Downloaded as {ext} in {elapsed:.1f}s ({size:.1f}MB)")
                 return True
         
         return False
         
     except Exception as e:
         print(f"❌ Download error: {e}")
+        
+        # Try alternative download method
+        print("🔄 Trying alternative download method...")
+        try:
+            response = requests.get(url, headers=HEADERS, stream=True, timeout=30)
+            if response.status_code == 200:
+                with open(output_path, 'wb') as f:
+                    total_size = int(response.headers.get('content-length', 0))
+                    downloaded = 0
+                    start = time.time()
+                    
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            if total_size > 0:
+                                percent = (downloaded / total_size) * 100
+                                if percent % 10 == 0:
+                                    print(f"📥 Download progress: {percent:.1f}%")
+                    
+                    elapsed = time.time() - start
+                    size = os.path.getsize(output_path) / (1024*1024)
+                    print(f"✅ Direct download in {elapsed:.1f}s ({size:.1f}MB)")
+                    return True
+        except Exception as e2:
+            print(f"❌ Alternative download failed: {e2}")
+        
         return False
 
 def compress_video(input_file, output_file):
@@ -484,13 +670,9 @@ async def upload_video(file_path, caption, thumbnail_path=None):
         print(f"☁️ Uploading: {filename}")
         print(f"📊 Size: {file_size:.1f}MB")
         
-        # Get video dimensions
         width, height = get_video_dimensions(file_path)
-        
-        # Get duration
         duration = get_video_duration(file_path)
         
-        # Prepare upload
         upload_params = {
             'chat_id': TELEGRAM_CHANNEL,
             'video': file_path,
@@ -504,7 +686,6 @@ async def upload_video(file_path, caption, thumbnail_path=None):
         if thumbnail_path and os.path.exists(thumbnail_path):
             upload_params['thumb'] = thumbnail_path
         
-        # Upload with progress
         start_time = time.time()
         last_percent = 0
         
@@ -518,7 +699,6 @@ async def upload_video(file_path, caption, thumbnail_path=None):
         
         upload_params['progress'] = progress
         
-        # Upload
         try:
             await app.send_video(**upload_params)
             elapsed = time.time() - start_time
@@ -532,7 +712,6 @@ async def upload_video(file_path, caption, thumbnail_path=None):
             
         except Exception as e:
             print(f"❌ Upload error: {e}")
-            # Try without progress callback
             try:
                 upload_params.pop('progress', None)
                 await app.send_video(**upload_params)
@@ -628,7 +807,6 @@ async def main():
     # Check dependencies
     print("\n🔍 Checking dependencies...")
     
-    # Check ffmpeg
     try:
         result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
         if result.returncode == 0:
@@ -654,9 +832,9 @@ async def main():
         print("💡 Creating sample config...")
         
         sample_config = {
-            "watch_url": "https://example.com/watch/movie",
-            "movie_name_arabic": "اسم الفيلم بالعربي",
-            "movie_name_english": "Movie Name in English"
+            "watch_url": "https://vk.com/video_ext.php?oid=848084895&id=456245049",
+            "movie_name_arabic": "فيلم شماريخ",
+            "movie_name_english": "shamarek"
         }
         
         with open(config_file, 'w', encoding='utf-8') as f:
@@ -709,7 +887,6 @@ async def main():
     
     elapsed = time.time() - start_time
     
-    # Results summary
     print(f"\n{'='*50}")
     print("📊 Processing Summary")
     print('='*50)
@@ -720,7 +897,6 @@ async def main():
     else:
         print(f"❌ Movie processing failed: {message}")
     
-    # Cleanup empty directory
     try:
         if os.path.exists(download_dir) and not os.listdir(download_dir):
             os.rmdir(download_dir)
@@ -733,7 +909,6 @@ async def main():
     print(f"⏰ Finished: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print('='*50)
     
-    # Close Telegram connection
     if app:
         await app.stop()
         print("🔌 Telegram connection closed")
