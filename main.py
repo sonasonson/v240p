@@ -207,7 +207,7 @@ def generate_watch_url(episode_num, series_name, season_num):
     if season_num > 1:
         base_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
     else:
-        base_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-{episode_num:02d}"
+        base_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
     
     print(f"🔗 Trying to access: {base_url}")
     
@@ -265,7 +265,7 @@ def generate_watch_url(episode_num, series_name, season_num):
                         if season_num > 1:
                             watch_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}-{suffix}/?do=watch"
                         else:
-                            watch_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-{episode_num:02d}-{suffix}/?do=watch"
+                            watch_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}-{suffix}/?do=watch"
                         
                         print(f"✅ Constructed watch URL with suffix '{suffix}': {watch_url}")
                         return watch_url, True
@@ -278,7 +278,7 @@ def generate_watch_url(episode_num, series_name, season_num):
             if season_num > 1:
                 test_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}-{suffix}/?do=watch"
             else:
-                test_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-{episode_num:02d}-{suffix}/?do=watch"
+                test_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}-{suffix}/?do=watch"
             
             try:
                 response = session.head(test_url, timeout=5)
@@ -292,7 +292,7 @@ def generate_watch_url(episode_num, series_name, season_num):
         if season_num > 1:
             fallback_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}/?do=watch"
         else:
-            fallback_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-{episode_num:02d}/?do=watch"
+            fallback_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}/?do=watch"
         
         print(f"⚠️ Using fallback URL: {fallback_url}")
         return fallback_url, False
@@ -303,7 +303,7 @@ def generate_watch_url(episode_num, series_name, season_num):
         if season_num > 1:
             fallback_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}/?do=watch"
         else:
-            fallback_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-{episode_num:02d}/?do=watch"
+            fallback_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}/?do=watch"
         
         return fallback_url, False
 
