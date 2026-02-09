@@ -469,7 +469,7 @@ def generate_episode_urls(series_name, season_num, start_ep, end_ep):
     urls = []
     
     for episode_num in range(start_ep, end_ep + 1):
-        if season_num > 1:
+        if season_num > 0:
             url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
         else:
             url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-{episode_num:02d}"
