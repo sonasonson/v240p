@@ -197,7 +197,7 @@ async def setup_telegram():
 def extract_video_url(episode_num, series_name, season_num):
     """Extract video URL from 3seq"""
     try:
-        if season_num = "0":
+        if season_num < 1:
             base_url = f"https://z.3seq.com/video/modablaj-{series_name}-episode-{episode_num:02d}"
         else:
             base_url = f"https://z.3seq.com/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
