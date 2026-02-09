@@ -200,176 +200,205 @@ async def setup_telegram():
 # ===== VIDEO PROCESSING FUNCTIONS =====
 
 def extract_video_url(episode_num, series_name, season_num):
-    """Extract video URL from 3seq with dynamic code handling"""
+    """Extract video URL from 3seq by following redirects"""
     try:
-        # First, try to get the page with the dynamic code
-        base_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
+        # Construct initial URL without dynamic code
+        if season_num > 0:
+            base_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
+        else:
+            base_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-{episode_num:02d}"
         
-        print(f"🔗 Fetching: {base_url}")
+        print(f"🔗 Initial URL: {base_url}")
         
-        # Allow redirects to follow to the actual page with dynamic code
-        response = requests.get(
-            base_url, 
-            headers=HEADERS, 
-            timeout=30, 
-            allow_redirects=True
-        )
+        # Create a session to handle cookies and redirects
+        session = requests.Session()
+        session.headers.update(HEADERS)
         
+        # Disable SSL verification for some problematic sites
+        session.verify = False
+        
+        # Make initial request and follow redirects
+        response = session.get(base_url, timeout=30, allow_redirects=True)
+        
+        # Get the final URL after all redirects
+        final_url = response.url
+        print(f"🔄 Final URL after redirects: {final_url}")
+        
+        # Check if we got a valid response
         if response.status_code != 200:
             print(f"❌ HTTP Error: {response.status_code}")
-            # Try without the 'z' subdomain
-            base_url = base_url.replace('z.3seq.cam', '3seq.cam')
-            print(f"🔄 Trying alternative: {base_url}")
-            response = requests.get(
-                base_url, 
-                headers=HEADERS, 
-                timeout=30, 
-                allow_redirects=True
-            )
-            
-            if response.status_code != 200:
-                return None, f"HTTP {response.status_code} on all domains"
+            return None, f"HTTP {response.status_code}"
         
-        # Get the final URL after redirects (should contain the dynamic code)
-        final_url = response.url
-        print(f"✅ Final URL: {final_url}")
+        # Add ?do=watch to the final URL if not already present
+        if '?do=watch' not in final_url:
+            # Ensure URL ends with /
+            if not final_url.endswith('/'):
+                final_url += '/'
+            watch_url = final_url + '?do=watch'
+        else:
+            watch_url = final_url
         
-        # If the URL doesn't end with /, add it
-        if not final_url.endswith('/'):
-            final_url += '/'
-        
-        # Add the watch parameter
-        watch_url = final_url + '?do=watch'
         print(f"🔍 Watch URL: {watch_url}")
         
-        # Get the watch page
-        response = requests.get(watch_url, headers=HEADERS, timeout=30)
+        # Now fetch the watch page
+        watch_response = session.get(watch_url, timeout=30)
         
-        if response.status_code != 200:
-            return None, f"Watch page error: HTTP {response.status_code}"
+        if watch_response.status_code != 200:
+            return None, f"Watch page error: HTTP {watch_response.status_code}"
         
-        # Try multiple patterns to find the video iframe/source
+        # Save HTML for debugging
+        html_debug = watch_response.text[:2000]
+        print(f"📄 HTML preview: {html_debug[:200]}...")
+        
+        # Try to find video iframe in multiple ways
         video_url = None
         
-        # Pattern 1: Standard iframe
+        # Method 1: Direct iframe extraction
         iframe_patterns = [
             r'<iframe[^>]+src="([^"]+)"',
             r'<iframe[^>]+src=\'([^\']+)\'',
             r'<iframe[^>]+src=([^ >]+)',
+            r'src="(https?://[^"]+)"[^>]*></iframe>',
         ]
         
         for pattern in iframe_patterns:
-            match = re.search(pattern, response.text, re.IGNORECASE)
-            if match:
-                video_url = match.group(1)
-                print(f"✅ Found iframe with pattern")
+            matches = re.findall(pattern, watch_response.text, re.IGNORECASE)
+            for match in matches:
+                if isinstance(match, tuple):
+                    match = match[0]
+                
+                if 'vidsp.net' in match or 'streamtape' in match or 'dood.' in match:
+                    video_url = match
+                    print(f"✅ Found video iframe with pattern: {pattern[:30]}...")
+                    break
+            if video_url:
                 break
         
-        # Pattern 2: Video tags
+        # Method 2: Look for video sources in script tags
         if not video_url:
-            video_patterns = [
-                r'<video[^>]+src="([^"]+)"',
-                r'<video[^>]+src=\'([^\']+)\'',
-                r'<source[^>]+src="([^"]+)"',
-                r'<source[^>]+src=\'([^\']+)\'',
+            script_patterns = [
+                r'src:\s*["\']([^"\']+)["\']',
+                r'file:\s*["\']([^"\']+)["\']',
+                r'url:\s*["\']([^"\']+)["\']',
+                r'video_url:\s*["\']([^"\']+)["\']',
+                r'embed_url:\s*["\']([^"\']+)["\']',
             ]
             
-            for pattern in video_patterns:
-                match = re.search(pattern, response.text, re.IGNORECASE)
-                if match:
-                    video_url = match.group(1)
-                    print(f"✅ Found video tag")
+            for pattern in script_patterns:
+                matches = re.findall(pattern, watch_response.text, re.IGNORECASE)
+                for match in matches:
+                    if 'http' in match and ('vidsp' in match or 'mp4' in match or 'm3u8' in match):
+                        video_url = match
+                        print(f"✅ Found video in script with pattern: {pattern[:30]}...")
+                        break
+                if video_url:
                     break
         
-        # Pattern 3: JavaScript variables
+        # Method 3: Look for direct video links
         if not video_url:
-            js_patterns = [
-                r'var\s+url\s*=\s*["\']([^"\']+)["\']',
-                r'video_url\s*=\s*["\']([^"\']+)["\']',
-                r'src\s*:\s*["\']([^"\']+)["\']',
-                r'file\s*:\s*["\']([^"\']+)["\']',
-                r'embed_url["\']:\s*["\']([^"\']+)["\']',
+            video_extensions = ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm', 'm3u8']
+            for ext in video_extensions:
+                pattern = rf'https?://[^"\'\s<>]+\.{ext}[^"\'\s<>]*'
+                matches = re.findall(pattern, watch_response.text, re.IGNORECASE)
+                if matches:
+                    video_url = matches[0]
+                    print(f"✅ Found direct video link with extension .{ext}")
+                    break
+        
+        # Method 4: Look for common video hosting domains
+        if not video_url:
+            video_hosts = [
+                r'https?://v\.vidsp\.net/[^"\'\s<>]+',
+                r'https?://vidsp\.net/[^"\'\s<>]+',
+                r'https?://streamtape\.com/[^"\'\s<>]+',
+                r'https?://dood\.\w+/[^"\'\s<>]+',
+                r'https?://mixdrop\.\w+/[^"\'\s<>]+',
+                r'https?://videobin\.\w+/[^"\'\s<>]+',
+                r'https?://embedo\.\w+/[^"\'\s<>]+',
             ]
             
-            for pattern in js_patterns:
-                match = re.search(pattern, response.text, re.IGNORECASE)
-                if match:
-                    video_url = match.group(1)
-                    print(f"✅ Found JS variable")
-                    break
-        
-        # Pattern 4: Direct video links
-        if not video_url:
-            direct_patterns = [
-                r'https?://[^"\']+\.(mp4|mkv|avi|mov|wmv|flv|webm)[^"\']*',
-                r'https?://[^"\']+/video/[^"\']+',
-                r'https?://[^"\']+/v/[^"\']+',
-                r'https?://[^"\']+/embed/[^"\']+',
-            ]
-            
-            for pattern in direct_patterns:
-                match = re.search(pattern, response.text, re.IGNORECASE)
-                if match:
-                    video_url = match.group(0)
-                    print(f"✅ Found direct video link")
+            for pattern in video_hosts:
+                matches = re.findall(pattern, watch_response.text, re.IGNORECASE)
+                if matches:
+                    video_url = matches[0]
+                    print(f"✅ Found video on hosting domain: {pattern[:30]}...")
                     break
         
         if not video_url:
-            # Last resort: Try to extract any URL that looks like video
-            url_pattern = r'https?://(?:v\.vidsp\.net|vidsp\.net|streamtape\.com|dood\.wf|mixdrop\.co|videobin\.co)[^"\'\s<>]+'
-            match = re.search(url_pattern, response.text, re.IGNORECASE)
-            if match:
-                video_url = match.group(0)
-                print(f"✅ Found video host URL")
+            # Try to find any iframe and check its content
+            all_iframes = re.findall(r'<iframe[^>]+>', watch_response.text, re.IGNORECASE)
+            for iframe in all_iframes:
+                # Extract src attribute
+                src_match = re.search(r'src=["\']([^"\']+)["\']', iframe)
+                if src_match:
+                    iframe_url = src_match.group(1)
+                    # Try to fetch the iframe content
+                    try:
+                        if iframe_url.startswith('//'):
+                            iframe_url = 'https:' + iframe_url
+                        elif iframe_url.startswith('/'):
+                            iframe_url = 'https://z.3seq.cam' + iframe_url
+                        
+                        print(f"🔄 Checking iframe: {iframe_url[:80]}...")
+                        iframe_response = session.get(iframe_url, timeout=10)
+                        
+                        # Look for video in iframe
+                        video_patterns = [
+                            r'<video[^>]+src="([^"]+)"',
+                            r'<source[^>]+src="([^"]+)"',
+                            r'file:\s*["\']([^"\']+)["\']',
+                        ]
+                        
+                        for pattern in video_patterns:
+                            video_match = re.search(pattern, iframe_response.text, re.IGNORECASE)
+                            if video_match:
+                                video_url = video_match.group(1)
+                                print(f"✅ Found video in iframe content")
+                                break
+                        
+                        if video_url:
+                            break
+                    except:
+                        continue
         
         if not video_url:
-            return None, "❌ No video source found on page"
+            return None, "❌ Could not find video source on the page"
         
-        # Clean and normalize the video URL
+        # Clean and normalize the URL
         if video_url.startswith('//'):
             video_url = 'https:' + video_url
         elif video_url.startswith('/'):
-            # Try common video hosting domains
-            domains = [
-                'https://v.vidsp.net',
-                'https://vidsp.net',
-                'https://streamtape.com',
-                'https://dood.wf',
-                'https://mixdrop.co',
-                'https://videobin.co',
-                'https://embedo.top'
-            ]
-            
-            for domain in domains:
-                test_url = domain + video_url
-                try:
-                    # Quick test with HEAD request
-                    test_response = requests.head(
-                        test_url, 
-                        headers=HEADERS, 
-                        timeout=5, 
-                        allow_redirects=True
-                    )
-                    if test_response.status_code == 200:
-                        video_url = test_url
-                        print(f"✅ Verified domain: {domain}")
-                        break
-                except:
-                    continue
-            
-            if video_url.startswith('/'):
-                # Default to vidsp
+            # Try to determine the correct domain
+            if 'vidsp.net' in watch_response.text:
                 video_url = 'https://v.vidsp.net' + video_url
+            else:
+                # Try common domains
+                domains = [
+                    'https://v.vidsp.net',
+                    'https://vidsp.net',
+                    'https://streamtape.com',
+                    'https://dood.wf',
+                ]
+                
+                for domain in domains:
+                    try:
+                        test_url = domain + video_url
+                        test_response = requests.head(test_url, headers=HEADERS, timeout=5)
+                        if test_response.status_code < 400:
+                            video_url = test_url
+                            break
+                    except:
+                        continue
         
-        print(f"✅ Video URL: {video_url[:100]}...")
-        return video_url, "✅ URL extracted successfully"
+        print(f"✅ Extracted video URL: {video_url[:100]}...")
+        return video_url, "✅ Successfully extracted video URL"
         
     except requests.exceptions.Timeout:
         return None, "⏰ Timeout connecting to server"
     except requests.exceptions.ConnectionError:
         return None, "🔌 Connection error"
     except Exception as e:
-        print(f"📝 Debug: {str(e)[:200]}")
+        print(f"📝 Debug error: {type(e).__name__}: {str(e)}")
         return None, f"❌ Error: {str(e)[:100]}"
 
 def download_video(url, output_path):
@@ -378,8 +407,8 @@ def download_video(url, output_path):
         ydl_opts = {
             'format': 'best[height<=720]/best',
             'outtmpl': output_path,
-            'quiet': True,
-            'no_warnings': True,
+            'quiet': False,  # Changed to False to see progress
+            'no_warnings': False,
             'user_agent': USER_AGENT,
             'referer': 'https://3seq.cam/',
             'http_headers': HEADERS,
@@ -398,9 +427,7 @@ def download_video(url, output_path):
         start = time.time()
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info:
-                print(f"📊 Video info: {info.get('title', 'Unknown')[:50]}")
+            ydl.download([url])
         
         elapsed = time.time() - start
         
@@ -410,36 +437,16 @@ def download_video(url, output_path):
             print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
             return True
         
-        # Try to find file with different extensions
+        # Try to find the file (yt-dlp might add extension)
         base_name = os.path.splitext(output_path)[0]
-        for ext in ['.mp4', '.mkv', '.webm', '.avi', '.flv']:
-            alt_file = base_name + ext
-            if os.path.exists(alt_file):
-                shutil.move(alt_file, output_path)
+        for ext in ['.mp4', '.mkv', '.webm', '.avi', '.flv', '']:
+            test_file = base_name + ext
+            if os.path.exists(test_file):
+                if test_file != output_path:
+                    shutil.move(test_file, output_path)
                 size = os.path.getsize(output_path) / (1024*1024)
                 print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
                 return True
-        
-        # Check if yt-dlp saved with different name
-        try:
-            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if 'title' in info:
-                    possible_files = [
-                        f"{info['title']}.mp4",
-                        f"{info['title']}.mkv",
-                        f"{info['title']}.webm",
-                        f"{ydl.prepare_filename(info)}"
-                    ]
-                    
-                    for file in possible_files:
-                        if os.path.exists(file):
-                            shutil.move(file, output_path)
-                            size = os.path.getsize(output_path) / (1024*1024)
-                            print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
-                            return True
-        except:
-            pass
         
         return False
         
@@ -700,72 +707,110 @@ async def process_episode(episode_num, series_name, series_name_arabic, season_n
         print(f"❌ Processing error: {e}")
         return False, str(e)
 
-# ===== ALTERNATIVE EXTRACTION METHOD =====
+# ===== ALTERNATIVE EXTRACTION USING DIFFERENT APPROACH =====
 
-def extract_video_url_alternative(episode_num, series_name, season_num):
-    """Alternative method for extracting video URL"""
+def extract_video_url_direct(episode_num, series_name, season_num):
+    """Direct approach: Try to access the page and parse the redirect"""
     try:
-        # Try common dynamic codes
-        common_codes = [
-            'fav4', 'avxn', 'bx7q', 'c9w2', 'd3r8', 'e5t1', 'f6y9', 'g7z4',
-            'h8x3', 'i9y2', 'j0z1', 'k1a8', 'l2b7', 'm3c6', 'n4d5', 'o5e4',
-            'p6f3', 'q7g2', 'r8h1', 's9i0', 't0j9', 'u1k8', 'v2l7', 'w3m6',
-            'x4n5', 'y5o4', 'z6p3'
-        ]
+        # Start with basic URL
+        base_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
         
-        # Try different domains
-        domains = [
-            'https://z.3seq.cam',
-            'https://3seq.cam',
-            'https://x.3seq.com',
-            'https://3seq.com'
-        ]
+        print(f"🔗 Trying direct access to: {base_url}")
         
-        for domain in domains:
-            for code in common_codes:
-                # Construct URL with dynamic code
-                url = f"{domain}/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}-{code}/?do=watch"
+        # Disable SSL warnings
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        # Create session with custom settings
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        session.verify = False
+        
+        # First request to get redirected URL
+        response = session.get(base_url, timeout=30, allow_redirects=True)
+        
+        # Check response history for redirects
+        if response.history:
+            print(f"🔄 Redirect chain:")
+            for i, resp in enumerate(response.history):
+                print(f"  {i+1}. {resp.status_code} -> {resp.url}")
+        
+        final_url = response.url
+        print(f"📍 Final URL: {final_url}")
+        
+        # Add watch parameter
+        if not final_url.endswith('/'):
+            final_url += '/'
+        watch_url = final_url + '?do=watch'
+        
+        print(f"👀 Watch URL: {watch_url}")
+        
+        # Get watch page
+        watch_response = session.get(watch_url, timeout=30)
+        
+        # Try to extract iframe using more aggressive parsing
+        iframe_matches = re.findall(r'<iframe[^>]+>', watch_response.text, re.IGNORECASE)
+        
+        for iframe in iframe_matches:
+            src_match = re.search(r'src=["\']([^"\']+)["\']', iframe)
+            if src_match:
+                iframe_src = src_match.group(1)
                 
-                print(f"🔄 Trying: {url[:80]}...")
+                # Clean iframe URL
+                if iframe_src.startswith('//'):
+                    iframe_src = 'https:' + iframe_src
+                elif iframe_src.startswith('/'):
+                    iframe_src = 'https://z.3seq.cam' + iframe_src
                 
+                print(f"🎬 Found iframe: {iframe_src[:80]}...")
+                
+                # Try to get the iframe content
                 try:
-                    response = requests.get(url, headers=HEADERS, timeout=10)
+                    iframe_response = session.get(iframe_src, timeout=15)
                     
-                    if response.status_code == 200:
-                        # Look for video iframe
-                        patterns = [
-                            r'<iframe[^>]+src="([^"]+)"',
-                            r'<iframe[^>]+src=\'([^\']+)\'',
-                            r'<iframe[^>]+src=([^ >]+)',
-                        ]
+                    # Look for video source in iframe
+                    source_patterns = [
+                        r'<source[^>]+src="([^"]+)"',
+                        r'<video[^>]+src="([^"]+)"',
+                        r'file:\s*["\']([^"\']+)["\']',
+                        r'src:\s*["\']([^"\']+)["\']',
+                    ]
+                    
+                    for pattern in source_patterns:
+                        source_match = re.search(pattern, iframe_response.text, re.IGNORECASE)
+                        if source_match:
+                            video_url = source_match.group(1)
+                            if video_url.startswith('//'):
+                                video_url = 'https:' + video_url
+                            
+                            print(f"✅ Found video source: {video_url[:80]}...")
+                            return video_url, "✅ Extracted from iframe"
+                    
+                    # If no video source found, check if iframe itself is a video
+                    if 'video' in iframe_response.headers.get('Content-Type', '') or \
+                       '.mp4' in iframe_src or '.m3u8' in iframe_src:
+                        return iframe_src, "✅ Iframe is video"
                         
-                        for pattern in patterns:
-                            match = re.search(pattern, response.text, re.IGNORECASE)
-                            if match:
-                                video_url = match.group(1)
-                                
-                                # Normalize URL
-                                if video_url.startswith('//'):
-                                    video_url = 'https:' + video_url
-                                elif video_url.startswith('/'):
-                                    video_url = 'https://v.vidsp.net' + video_url
-                                
-                                print(f"✅ Found video with code {code} on {domain}")
-                                return video_url, f"✅ Found with code {code}"
-                except:
-                    continue
+                except Exception as e:
+                    print(f"⚠️ Could not fetch iframe: {str(e)[:50]}")
         
-        return None, "❌ Could not find video with any dynamic code"
+        # If no iframe found, try to find direct links
+        direct_links = re.findall(r'https?://[^"\'\s<>]+\.(?:mp4|m3u8|mkv)[^"\'\s<>]*', watch_response.text, re.IGNORECASE)
+        if direct_links:
+            return direct_links[0], "✅ Found direct video link"
+        
+        return None, "❌ Could not extract video URL"
         
     except Exception as e:
-        return None, f"❌ Error: {str(e)[:100]}"
+        print(f"❌ Direct extraction error: {str(e)[:100]}")
+        return None, f"❌ Error: {str(e)[:50]}"
 
 # ===== MAIN FUNCTION =====
 
 async def main():
     """Main function"""
     print("="*50)
-    print("🎬 GitHub Video Processor v2.0 (Dynamic URL Support)")
+    print("🎬 GitHub Video Processor v3.0 (Improved URL Extraction)")
     print("="*50)
     
     # Check dependencies
@@ -865,13 +910,18 @@ async def main():
         
         start_time = time.time()
         
-        # Try main extraction method first
+        # Try multiple extraction methods
+        video_url = None
+        message = ""
+        
+        # Try method 1
+        print("🔄 Method 1: Standard extraction...")
         video_url, message = extract_video_url(episode_num, series_name, season_num)
         
-        # If main method fails, try alternative
+        # Try method 2 if method 1 fails
         if not video_url:
-            print("🔄 Main method failed, trying alternative...")
-            video_url, message = extract_video_url_alternative(episode_num, series_name, season_num)
+            print("🔄 Method 2: Direct extraction...")
+            video_url, message = extract_video_url_direct(episode_num, series_name, season_num)
         
         if not video_url:
             print(f"❌ Episode {episode_num:02d}: {message}")
