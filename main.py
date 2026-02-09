@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Telegram Video Downloader & Uploader - Fixed for z.3seq.cam
-Supports direct URLs with random suffixes like -avxn
+Telegram Video Downloader & Uploader - Complete Version
 """
 
 import os
@@ -55,16 +54,16 @@ if not validate_env():
 
 TELEGRAM_API_ID = int(TELEGRAM_API_ID)
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 HEADERS = {
     'User-Agent': USER_AGENT,
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
     'Accept-Encoding': 'gzip, deflate',
     'DNT': '1',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
-    'Referer': 'https://z.3seq.cam/'
+    'Referer': 'https://3seq.com/'
 }
 
 # ===== IMPORTS =====
@@ -193,215 +192,75 @@ async def setup_telegram():
         print("4. Check if account is banned")
         return False
 
-# ===== URL HANDLING FUNCTIONS =====
+# ===== VIDEO PROCESSING FUNCTIONS =====
 
-def generate_watch_url(episode_num, series_name, season_num):
-    """
-    Generate the correct watch URL for z.3seq.cam
-    Format: https://z.3seq.cam/video/modablaj-kiralik-ask-episode-s01e02-avxn/?do=watch
-    
-    Since we can't know the random suffix (-avxn) in advance, we need to discover it
-    by accessing the page first.
-    """
-    # First, try to access the episode page which will redirect to the correct URL
-    if season_num > 1:
-        base_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
-    else:
-        base_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
-    
-    print(f"🔗 Trying to access: {base_url}")
-    
+def extract_video_url(episode_num, series_name, season_num):
+    """Extract video URL from 3seq"""
     try:
-        # Create a session to handle redirects
-        session = requests.Session()
-        session.headers.update(HEADERS)
-        
-        # Get the page and follow redirects
-        response = session.get(base_url, timeout=30, allow_redirects=True)
-        
-        if response.status_code == 200:
-            # Get the final URL after all redirects
-            final_url = response.url
-            
-            # Check if this is already a watch page
-            if '?do=watch' in final_url:
-                print(f"✅ Found watch URL: {final_url}")
-                return final_url, True
-            else:
-                # Check if it's the page with the suffix (like -avxn)
-                # If it ends with a suffix like -avxn/, add ?do=watch
-                if re.search(r'-\w{4}/?$', final_url):
-                    watch_url = final_url.rstrip('/') + '/?do=watch'
-                    print(f"✅ Generated watch URL: {watch_url}")
-                    return watch_url, True
-                else:
-                    # Try to extract the suffix from the page content
-                    # Look for links containing ?do=watch
-                    watch_patterns = [
-                        r'href=["\']([^"\']+\?do=watch)["\']',
-                        r'<a[^>]+href=["\']([^"\']+\?do=watch)["\']',
-                        r'watch["\'][^>]+href=["\']([^"\']+)["\']'
-                    ]
-                    
-                    for pattern in watch_patterns:
-                        match = re.search(pattern, response.text, re.IGNORECASE)
-                        if match:
-                            watch_path = match.group(1)
-                            if watch_path.startswith('//'):
-                                watch_url = 'https:' + watch_path
-                            elif watch_path.startswith('/'):
-                                watch_url = 'https://z.3seq.cam' + watch_path
-                            else:
-                                watch_url = watch_path
-                            
-                            print(f"✅ Found watch link: {watch_url}")
-                            return watch_url, True
-                    
-                    # If no watch link found, try to construct it
-                    # Extract the suffix from the final URL if present
-                    suffix_match = re.search(r'-(\w{4})/?$', final_url)
-                    if suffix_match:
-                        suffix = suffix_match.group(1)
-                        if season_num > 1:
-                            watch_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}-{suffix}/?do=watch"
-                        else:
-                            watch_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}-{suffix}/?do=watch"
-                        
-                        print(f"✅ Constructed watch URL with suffix '{suffix}': {watch_url}")
-                        return watch_url, True
-        
-        # If all else fails, try some common suffixes
-        print("⚠️ Could not discover suffix, trying common suffixes...")
-        common_suffixes = ['avxn', 'abcd', 'wxyz', 'test', 'demo', 'temp', 'play']
-        
-        for suffix in common_suffixes:
-            if season_num > 1:
-                test_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}-{suffix}/?do=watch"
-            else:
-                test_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}-{suffix}/?do=watch"
-            
-            try:
-                response = session.head(test_url, timeout=5)
-                if response.status_code == 200:
-                    print(f"✅ Found working suffix '{suffix}': {test_url}")
-                    return test_url, True
-            except:
-                continue
-        
-        # Last resort: try without suffix
-        if season_num > 1:
-            fallback_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}/?do=watch"
+        if season_num > 0:
+            base_url = f"https://z.3seq.com/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
         else:
-            fallback_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}/?do=watch"
+            base_url = f"https://z.3seq.com/video/modablaj-{series_name}-episode-{episode_num:02d}"
         
-        print(f"⚠️ Using fallback URL: {fallback_url}")
-        return fallback_url, False
+        print(f"🔗 Fetching: {base_url}")
         
-    except Exception as e:
-        print(f"❌ Error discovering watch URL: {e}")
-        # Fallback to direct construction
-        if season_num > 1:
-            fallback_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}/?do=watch"
-        else:
-            fallback_url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}/?do=watch"
-        
-        return fallback_url, False
-
-def extract_video_url_from_watch_page(watch_url):
-    """
-    Extract the actual video URL from the watch page
-    Example watch URL: https://z.3seq.cam/video/modablaj-kiralik-ask-episode-s01e02-avxn/?do=watch
-    """
-    try:
-        print(f"🔍 Extracting video from: {watch_url}")
-        
-        session = requests.Session()
-        session.headers.update(HEADERS)
-        
-        response = session.get(watch_url, timeout=30)
-        
+        response = requests.get(base_url, headers=HEADERS, timeout=30)
         if response.status_code != 200:
             return None, f"HTTP {response.status_code}"
         
-        # Look for iframe embeds
-        iframe_patterns = [
-            r'<iframe[^>]+src=["\']([^"\']+)["\']',
-            r'src=["\'](https?://[^"\']*vidsp\.net[^"\']*)["\']',
-            r'iframe.*?src=["\'](https?://[^"\']+)["\']'
-        ]
+        # Find watch link
+        watch_match = re.search(r'href=["\']([^"\']+episode[^"\']+\?do=watch)["\']', response.text)
+        if watch_match:
+            watch_url = watch_match.group(1)
+            if watch_url.startswith('//'):
+                watch_url = 'https:' + watch_url
+            elif watch_url.startswith('/'):
+                watch_url = 'https://x.3seq.com' + watch_url
+        else:
+            watch_url = f"{base_url}-yvra/?do=watch"
         
-        for pattern in iframe_patterns:
-            match = re.search(pattern, response.text, re.IGNORECASE)
-            if match:
-                video_url = match.group(1)
-                if video_url.startswith('//'):
-                    video_url = 'https:' + video_url
-                print(f"✅ Found video URL: {video_url}")
-                return video_url, "✅ Video URL extracted"
+        # Get video iframe
+        response = requests.get(watch_url, headers=HEADERS, timeout=30)
+        iframe_match = re.search(r'<iframe[^>]+src="([^"]+)"', response.text)
         
-        # Look for direct video links
-        video_patterns = [
-            r'source.*?src=["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
-            r'video.*?src=["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
-            r'file["\']?\s*:\s*["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
-            r'(https?://[^"\']+\.m3u8[^"\']*)'
-        ]
+        if not iframe_match:
+            return None, "No video iframe found"
         
-        for pattern in video_patterns:
-            match = re.search(pattern, response.text, re.IGNORECASE)
-            if match:
-                video_url = match.group(1)
-                print(f"✅ Found direct video URL: {video_url}")
-                return video_url, "✅ Video URL extracted"
+        video_url = iframe_match.group(1)
+        if video_url.startswith('//'):
+            video_url = 'https:' + video_url
+        elif video_url.startswith('/'):
+            video_url = 'https://v.vidsp.net' + video_url
         
-        # Try to use yt-dlp to extract URL
-        print("🔄 Trying to extract with yt-dlp...")
-        try:
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'user_agent': USER_AGENT,
-                'referer': watch_url,
-                'extract_flat': True,
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(watch_url, download=False)
-                if info and 'url' in info:
-                    video_url = info['url']
-                    print(f"✅ yt-dlp extracted URL: {video_url}")
-                    return video_url, "✅ Video URL extracted via yt-dlp"
-        except:
-            pass
+        return video_url, "✅ URL extracted"
         
-        return None, "❌ No video URL found in watch page"
-        
+    except requests.exceptions.Timeout:
+        return None, "⏰ Timeout"
     except Exception as e:
-        return None, f"❌ Error: {str(e)[:100]}"
+        return None, f"❌ Error: {str(e)}"
 
-def download_video(video_url, output_path):
+def download_video(url, output_path):
     """Download video using yt-dlp"""
     try:
         ydl_opts = {
             'format': 'best[height<=720]/best',
             'outtmpl': output_path,
-            'quiet': False,
-            'no_warnings': False,
+            'quiet': True,
+            'no_warnings': True,
             'user_agent': USER_AGENT,
-            'referer': 'https://z.3seq.cam/',
+            'referer': 'https://v.vidsp.net/',
             'http_headers': HEADERS,
             'retries': 10,
             'fragment_retries': 10,
             'skip_unavailable_fragments': True,
             'socket_timeout': 30,
-            'verbose': True,
         }
         
-        print(f"📥 Downloading from: {video_url[:100]}...")
+        print(f"📥 Downloading...")
         start = time.time()
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
+            ydl.download([url])
         
         elapsed = time.time() - start
         
@@ -634,43 +493,36 @@ async def process_episode(episode_num, series_name, series_name_arabic, season_n
                 pass
     
     try:
-        # 1. Generate correct watch URL
-        print("🔗 Generating watch URL...")
-        watch_url, watch_found = generate_watch_url(episode_num, series_name, season_num)
-        
-        if not watch_found:
-            print(f"⚠️ Could not find correct watch URL, trying anyway: {watch_url}")
-        
-        # 2. Extract video URL from watch page
+        # 1. Extract URL
         print("🔍 Extracting video URL...")
-        video_url, message = extract_video_url_from_watch_page(watch_url)
+        video_url, message = extract_video_url(episode_num, series_name, season_num)
         
         if not video_url:
-            return False, f"Video extraction failed: {message}"
+            return False, f"URL extraction failed: {message}"
         
         print(f"{message}")
         
-        # 3. Download
+        # 2. Download
         print("📥 Downloading video...")
         if not download_video(video_url, temp_file):
             return False, "Download failed"
         
-        # 4. Create thumbnail
+        # 3. Create thumbnail
         print("🖼️ Creating thumbnail...")
         create_thumbnail(temp_file, thumbnail_file)
         
-        # 5. Compress
+        # 4. Compress
         print("🎬 Compressing video...")
         if not compress_video(temp_file, final_file):
             print("⚠️ Compression failed, using original")
             shutil.copy2(temp_file, final_file)
         
-        # 6. Upload
+        # 5. Upload
         caption = f"{series_name_arabic} الموسم {season_num} الحلقة {episode_num}"
         thumb = thumbnail_file if os.path.exists(thumbnail_file) else None
         
         if await upload_video(final_file, caption, thumb):
-            # 7. Clean up
+            # 6. Clean up
             for file_path in [temp_file, final_file, thumbnail_file]:
                 if os.path.exists(file_path):
                     try:
@@ -691,8 +543,7 @@ async def process_episode(episode_num, series_name, series_name_arabic, season_n
 async def main():
     """Main function"""
     print("="*50)
-    print("🎬 z.3seq.cam Video Processor v1.0")
-    print("   Supports random suffixes like -avxn")
+    print("🎬 GitHub Video Processor v2.0")
     print("="*50)
     
     # Check dependencies
@@ -729,11 +580,11 @@ async def main():
         print("💡 Creating sample config...")
         
         sample_config = {
-            "series_name": "kiralik-ask",
-            "series_name_arabic": "حب للايجار",
-            "season_num": 1,
+            "series_name": "the-protector",
+            "series_name_arabic": "المحافظ",
+            "season_num": 2,
             "start_episode": 1,
-            "end_episode": 89
+            "end_episode": 8
         }
         
         with open(config_file, 'w', encoding='utf-8') as f:
