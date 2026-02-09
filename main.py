@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Telegram Video Downloader & Uploader - Complete Version
+Telegram Video Downloader & Uploader - Modified for 3seq.cam
+Supports redirects with random suffixes like -avxn
 """
 
 import os
@@ -12,7 +13,9 @@ import requests
 import subprocess
 import shutil
 import asyncio
+import argparse
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs
 
 # ===== CONFIGURATION =====
 # Get from GitHub Secrets
@@ -54,16 +57,19 @@ if not validate_env():
 
 TELEGRAM_API_ID = int(TELEGRAM_API_ID)
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 HEADERS = {
     'User-Agent': USER_AGENT,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Accept-Encoding': 'gzip, deflate',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
     'DNT': '1',
     'Connection': 'keep-alive',
     'Upgrade-Insecure-Requests': '1',
-    'Referer': 'https://3seq.com/'
+    'Referer': 'https://z.3seq.cam/',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'same-origin',
 }
 
 # ===== IMPORTS =====
@@ -76,6 +82,7 @@ def install_requirements():
         "tgcrypto>=1.2.0",
         "yt-dlp>=2024.4.9",
         "requests>=2.31.0",
+        "beautifulsoup4>=4.12.0",
     ]
     
     for req in requirements:
@@ -93,6 +100,7 @@ install_requirements()
 from pyrogram import Client
 from pyrogram.errors import FloodWait, AuthKeyUnregistered, SessionPasswordNeeded
 import yt_dlp
+from bs4 import BeautifulSoup
 
 app = None
 
@@ -192,92 +200,349 @@ async def setup_telegram():
         print("4. Check if account is banned")
         return False
 
-# ===== VIDEO PROCESSING FUNCTIONS =====
+# ===== URL PROCESSING FUNCTIONS =====
 
-def extract_video_url(episode_num, series_name, season_num):
-    """Extract video URL from 3seq"""
-    try:
-        if season_num < 1:
-            base_url = f"https://z.3seq.com/video/modablaj-{series_name}-episode-{episode_num:02d}"
+def extract_season_episode_from_url(url):
+    """
+    Extract season and episode numbers from 3seq URL
+    Supports formats:
+    - https://z.3seq.cam/video/modablaj-kiralik-ask-episode-s01e89
+    - https://z.3seq.cam/video/modablaj-kiralik-ask-episode-s01e89-avxn/
+    - https://z.3seq.cam/video/modablaj-series-name-episode-s02e15
+    """
+    print(f"🔗 Parsing URL: {url}")
+    
+    # Parse the URL
+    parsed_url = urlparse(url)
+    path_parts = parsed_url.path.split('/')
+    
+    if len(path_parts) < 3:
+        return None, None, "Invalid URL format"
+    
+    video_slug = path_parts[-1]
+    
+    # Try to extract season and episode using regex patterns
+    # Pattern 1: s01e89 format (with optional random suffix like -avxn)
+    season_episode_match = re.search(r's(\d+)e(\d+)', video_slug, re.IGNORECASE)
+    
+    if season_episode_match:
+        season_num = int(season_episode_match.group(1))
+        episode_num = int(season_episode_match.group(2))
+        
+        # Extract series name (remove -avxn or similar random suffix)
+        clean_slug = re.sub(r'-[a-z]{4}$', '', video_slug)  # Remove 4-letter suffix like -avxn
+        series_match = re.search(r'modablaj-([a-z0-9-]+)-episode', clean_slug, re.IGNORECASE)
+        if series_match:
+            series_name = series_match.group(1)
         else:
-            base_url = f"https://z.3seq.com/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
+            # Fallback: extract from URL path
+            series_name = clean_slug.split('-episode-')[0].replace('modablaj-', '')
         
-        print(f"🔗 Fetching: {base_url}")
+        return season_num, episode_num, series_name
+    
+    # Pattern 2: Just episode number (assume season 1)
+    episode_match = re.search(r'-episode-(\d+)(?:-[a-z]{4})?$', video_slug)
+    if episode_match:
+        season_num = 1
+        episode_num = int(episode_match.group(1))
         
-        response = requests.get(base_url, headers=HEADERS, timeout=30)
+        # Extract series name
+        clean_slug = re.sub(r'-[a-z]{4}$', '', video_slug)  # Remove random suffix
+        series_match = re.search(r'modablaj-([a-z0-9-]+)-episode', clean_slug)
+        if series_match:
+            series_name = series_match.group(1)
+        else:
+            series_name = clean_slug.split('-episode-')[0].replace('modablaj-', '')
+        
+        return season_num, episode_num, series_name
+    
+    return None, None, "Cannot extract season/episode from URL"
+
+def get_arabic_series_name(english_name):
+    """
+    Map English series names to Arabic names
+    Can be extended with more series
+    """
+    series_mapping = {
+        "kiralik-ask": "حب للايجار",
+        "the-protector": "المحافظ",
+        "dirilis-ertugrul": "قيامة ارطغرل",
+        "kurulus-osman": "تأسيس عثمان",
+        "yargi": "قضاء",
+        "ramo": "رامو",
+        "son-yaz": "آخر كتابة",
+        "sadakatsiz": "الخائن",
+        "sen-calka": "أنت رقصت",
+        "icerde": "في الداخل"
+    }
+    
+    # Try exact match first
+    if english_name in series_mapping:
+        return series_mapping[english_name]
+    
+    # Try partial match
+    for key, arabic_name in series_mapping.items():
+        if key in english_name:
+            return arabic_name
+    
+    # Return the English name if no match found
+    return english_name.replace('-', ' ').title()
+
+def extract_video_url_from_page(url):
+    """
+    Extract video URL from 3seq.cam page - UPDATED VERSION
+    Handles redirects and random URL suffixes like -avxn
+    """
+    try:
+        print(f"🌐 Fetching page (may redirect): {url}")
+        
+        # Allow redirects to follow the random suffix link
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        
+        response = session.get(url, timeout=30, allow_redirects=True)
+        
         if response.status_code != 200:
             return None, f"HTTP {response.status_code}"
         
-        # Find watch link
-        watch_match = re.search(r'href=["\']([^"\']+episode[^"\']+\?do=watch)["\']', response.text)
-        if watch_match:
-            watch_url = watch_match.group(1)
-            if watch_url.startswith('//'):
-                watch_url = 'https:' + watch_url
-            elif watch_url.startswith('/'):
-                watch_url = 'https://x.3seq.com' + watch_url
+        # Get the FINAL URL after all redirects
+        final_url = response.url
+        print(f"✅ Final URL after redirects: {final_url}")
+        
+        # Check if we need to add ?do=watch
+        # If not already present, add it to the final URL
+        if '?do=watch' not in final_url:
+            if '?' in final_url:
+                watch_url = final_url + '&do=watch'
+            else:
+                watch_url = final_url.rstrip('/') + '/?do=watch'
         else:
-            watch_url = f"{base_url}-yvra/?do=watch"
+            watch_url = final_url
         
-        # Get video iframe
-        response = requests.get(watch_url, headers=HEADERS, timeout=30)
-        iframe_match = re.search(r'<iframe[^>]+src="([^"]+)"', response.text)
+        print(f"🔍 Checking watch page: {watch_url}")
         
-        if not iframe_match:
-            return None, "No video iframe found"
+        # Now fetch the watch page to find the actual video
+        watch_response = session.get(watch_url, timeout=30)
         
-        video_url = iframe_match.group(1)
-        if video_url.startswith('//'):
-            video_url = 'https:' + video_url
-        elif video_url.startswith('/'):
-            video_url = 'https://v.vidsp.net' + video_url
+        # Use BeautifulSoup for better HTML parsing
+        soup = BeautifulSoup(watch_response.text, 'html.parser')
         
-        return video_url, "✅ URL extracted"
+        video_url = None
+        
+        # METHOD 1: Look for iframe embed (most common)
+        iframes = soup.find_all('iframe')
+        for iframe in iframes:
+            src = iframe.get('src', '')
+            if src and any(domain in src for domain in ['vidsp.net', 'youtube.com', 'dailymotion.com', 'vimeo.com', 'cloudemb.com']):
+                video_url = src
+                if video_url.startswith('//'):
+                    video_url = 'https:' + video_url
+                print(f"🎬 Found embedded video URL (iframe): {video_url}")
+                break
+        
+        # METHOD 2: Look for video tags with src attribute
+        if not video_url:
+            video_tags = soup.find_all('video')
+            for video in video_tags:
+                src = video.get('src', '')
+                if src and any(ext in src for ext in ['.mp4', '.m3u8', '.webm', '.ogg']):
+                    video_url = src
+                    print(f"🎬 Found video tag URL: {video_url}")
+                    break
+                
+                # Check for source tags inside video tag
+                source_tags = video.find_all('source')
+                for source in source_tags:
+                    src = source.get('src', '')
+                    if src and any(ext in src for ext in ['.mp4', '.m3u8', '.webm', '.ogg']):
+                        video_url = src
+                        print(f"🎬 Found source tag URL: {video_url}")
+                        break
+                if video_url:
+                    break
+        
+        # METHOD 3: Look for JavaScript variables containing video URLs
+        if not video_url:
+            script_tags = soup.find_all('script')
+            for script in script_tags:
+                if script.string:
+                    js_content = script.string
+                    # Look for common video URL patterns in JavaScript
+                    patterns = [
+                        r'file["\']?\s*:\s*["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
+                        r'src["\']?\s*:\s*["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
+                        r'video_url["\']?\s*:\s*["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
+                        r'url["\']?\s*:\s*["\'](https?://[^"\']+\.mp4[^"\']*)["\']',
+                        r'(https?://[^"\']+vidsp\.net[^"\']+)',
+                        r'(https?://[^"\']+\.m3u8[^"\']*)'
+                    ]
+                    
+                    for pattern in patterns:
+                        matches = re.findall(pattern, js_content, re.IGNORECASE)
+                        for match in matches:
+                            if match and any(ext in match for ext in ['.mp4', '.m3u8', 'vidsp.net']):
+                                video_url = match
+                                print(f"🎬 Found video URL in JavaScript: {video_url}")
+                                break
+                        if video_url:
+                            break
+                if video_url:
+                    break
+        
+        # METHOD 4: Look for data-* attributes that might contain video URLs
+        if not video_url:
+            all_elements = soup.find_all(attrs={"data-src": True})
+            for element in all_elements:
+                data_src = element.get('data-src', '')
+                if data_src and any(ext in data_src for ext in ['.mp4', '.m3u8', 'vidsp.net']):
+                    video_url = data_src
+                    print(f"🎬 Found video URL in data-src: {video_url}")
+                    break
+        
+        # METHOD 5: Search the entire HTML for video URL patterns
+        if not video_url:
+            html_text = str(soup)
+            video_patterns = [
+                r'(https?://[^"\'\s<>]+vidsp\.net[^"\'\s<>]+)',
+                r'(https?://[^"\'\s<>]+\.mp4[^"\'\s<>]*)',
+                r'(https?://[^"\'\s<>]+\.m3u8[^"\'\s<>]*)',
+                r'file["\']?\s*:\s*["\'](https?://[^"\']+)["\']',
+                r'source["\']?\s*:\s*["\'](https?://[^"\']+)["\']'
+            ]
+            
+            for pattern in video_patterns:
+                matches = re.findall(pattern, html_text, re.IGNORECASE)
+                for match in matches:
+                    if match and any(ext in match for ext in ['.mp4', '.m3u8', 'vidsp.net', 'cloudemb.com']):
+                        # Filter out common false positives
+                        if not any(false_positive in match for false_positive in ['google-analytics', 'facebook.com', 'twitter.com', 'css', 'js']):
+                            video_url = match
+                            print(f"🎬 Found video URL via pattern matching: {video_url}")
+                            break
+                if video_url:
+                    break
+        
+        if video_url:
+            # Ensure the URL is complete
+            if video_url.startswith('//'):
+                video_url = 'https:' + video_url
+            elif video_url.startswith('/'):
+                video_url = 'https://z.3seq.cam' + video_url
+            
+            return video_url, f"✅ Video URL extracted from {final_url}"
+        else:
+            # For debugging: Save the page to see its structure
+            debug_file = f"debug_page_{int(time.time())}.html"
+            with open(debug_file, 'w', encoding='utf-8') as f:
+                f.write(watch_response.text[:10000])  # First 10000 chars
+            print(f"⚠️ Saved page snippet to {debug_file} for inspection")
+            
+            # Try one more method: Look for any URL with video-related terms
+            all_urls = re.findall(r'https?://[^"\'\s<>]+', watch_response.text)
+            for test_url in all_urls:
+                if any(term in test_url.lower() for term in ['video', 'stream', 'embed', 'player', 'vid', 'watch']):
+                    print(f"🔍 Potential video URL found: {test_url[:80]}...")
+                    # Try to validate by checking if it's accessible
+                    try:
+                        test_resp = session.head(test_url, timeout=5)
+                        if test_resp.status_code == 200:
+                            content_type = test_resp.headers.get('content-type', '')
+                            if any(video_type in content_type for video_type in ['video/', 'mp4', 'mpeg', 'x-mpegurl']):
+                                print(f"✅ Validated as video URL: {test_url}")
+                                return test_url, f"✅ Video URL found via validation"
+                    except:
+                        pass
+            
+            return None, f"❌ No video URL found in watch page. Check {debug_file}"
         
     except requests.exceptions.Timeout:
-        return None, "⏰ Timeout"
+        return None, "⏰ Timeout fetching page"
+    except requests.exceptions.TooManyRedirects:
+        return None, "🔄 Too many redirects. Site structure may have changed."
     except Exception as e:
-        return None, f"❌ Error: {str(e)}"
+        return None, f"❌ Error: {str(e)[:100]}"
+
+def generate_episode_urls(series_name, season_num, start_ep, end_ep):
+    """
+    Generate episode URLs for batch processing
+    """
+    urls = []
+    
+    for episode_num in range(start_ep, end_ep + 1):
+        if season_num > 1:
+            url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
+        else:
+            url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-{episode_num:02d}"
+        urls.append((episode_num, url))
+    
+    return urls
+
+# ===== VIDEO PROCESSING FUNCTIONS =====
 
 def download_video(url, output_path):
-    """Download video using yt-dlp"""
+    """Download video using yt-dlp with enhanced settings"""
     try:
         ydl_opts = {
             'format': 'best[height<=720]/best',
             'outtmpl': output_path,
-            'quiet': True,
-            'no_warnings': True,
+            'quiet': False,
+            'no_warnings': False,
             'user_agent': USER_AGENT,
-            'referer': 'https://v.vidsp.net/',
+            'referer': 'https://z.3seq.cam/',
             'http_headers': HEADERS,
             'retries': 10,
             'fragment_retries': 10,
             'skip_unavailable_fragments': True,
             'socket_timeout': 30,
+            'extractor_args': {
+                'generic': ['--no-check-certificate']
+            },
+            'cookiesfrombrowser': ('chrome',),  # Try to use browser cookies if available
+            'verbose': True,  # More detailed output for debugging
         }
         
-        print(f"📥 Downloading...")
+        print(f"📥 Downloading from: {url}")
         start = time.time()
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            try:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
+            except Exception as e:
+                print(f"⚠️ yt-dlp extraction failed: {e}")
+                print("🔄 Trying alternative download method...")
+                
+                # Fallback to direct download if yt-dlp fails
+                session = requests.Session()
+                session.headers.update(HEADERS)
+                
+                resp = session.get(url, stream=True, timeout=30)
+                if resp.status_code == 200:
+                    with open(output_path, 'wb') as f:
+                        for chunk in resp.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                    print("✅ Downloaded via fallback method")
+                else:
+                    return False
         
         elapsed = time.time() - start
         
+        # Check if file was downloaded
         if os.path.exists(output_path):
             size = os.path.getsize(output_path) / (1024*1024)
             print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
             return True
-        
-        # Try different extensions
-        base = os.path.splitext(output_path)[0]
-        for ext in ['.mp4', '.mkv', '.webm', '.avi']:
-            alt_file = base + ext
-            if os.path.exists(alt_file):
-                shutil.move(alt_file, output_path)
-                size = os.path.getsize(output_path) / (1024*1024)
-                print(f"✅ Downloaded in {elapsed:.1f}s ({size:.1f}MB)")
-                return True
+        else:
+            # Check for file with different extension
+            base_name = os.path.splitext(output_path)[0]
+            for ext in ['.mp4', '.mkv', '.webm', '.avi', '.flv', '.mov']:
+                alt_file = base_name + ext
+                if os.path.exists(alt_file):
+                    shutil.move(alt_file, output_path)
+                    size = os.path.getsize(output_path) / (1024*1024)
+                    print(f"✅ Downloaded (renamed) in {elapsed:.1f}s ({size:.1f}MB)")
+                    return True
         
         return False
         
@@ -474,15 +739,28 @@ async def upload_video(file_path, caption, thumbnail_path=None):
         print(f"❌ Upload failed: {e}")
         return False
 
-async def process_episode(episode_num, series_name, series_name_arabic, season_num, download_dir):
-    """Process a single episode"""
+async def process_single_url(url, download_dir):
+    """
+    Process a single URL with random suffix handling
+    """
     print(f"\n{'─'*50}")
-    print(f"🎬 Episode {episode_num:02d}")
+    print(f"🎬 Processing URL")
+    print(f"📝 {url}")
     print(f"{'─'*50}")
     
-    temp_file = os.path.join(download_dir, f"temp_{episode_num:02d}.mp4")
-    final_file = os.path.join(download_dir, f"final_{episode_num:02d}.mp4")
-    thumbnail_file = os.path.join(download_dir, f"thumb_{episode_num:02d}.jpg")
+    # Extract season and episode from URL
+    season_num, episode_num, series_name = extract_season_episode_from_url(url)
+    
+    if season_num is None or episode_num is None:
+        print("❌ Cannot extract season/episode information")
+        return False, "Invalid URL format"
+    
+    # Get Arabic series name
+    series_name_arabic = get_arabic_series_name(series_name)
+    
+    temp_file = os.path.join(download_dir, f"temp_s{season_num:02d}e{episode_num:02d}.mp4")
+    final_file = os.path.join(download_dir, f"final_s{season_num:02d}e{episode_num:02d}.mp4")
+    thumbnail_file = os.path.join(download_dir, f"thumb_s{season_num:02d}e{episode_num:02d}.jpg")
     
     # Clean old files
     for f in [temp_file, final_file, thumbnail_file]:
@@ -493,14 +771,15 @@ async def process_episode(episode_num, series_name, series_name_arabic, season_n
                 pass
     
     try:
-        # 1. Extract URL
-        print("🔍 Extracting video URL...")
-        video_url, message = extract_video_url(episode_num, series_name, season_num)
+        # 1. Extract video URL from page (handles redirects and random suffixes)
+        print("🔍 Extracting video URL from page...")
+        video_url, message = extract_video_url_from_page(url)
         
         if not video_url:
             return False, f"URL extraction failed: {message}"
         
         print(f"{message}")
+        print(f"🎬 Video URL: {video_url[:100]}...")
         
         # 2. Download
         print("📥 Downloading video...")
@@ -536,15 +815,130 @@ async def process_episode(episode_num, series_name, series_name_arabic, season_n
         
     except Exception as e:
         print(f"❌ Processing error: {e}")
+        # Try to clean up even on error
+        for file_path in [temp_file, final_file, thumbnail_file]:
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
         return False, str(e)
+
+async def process_episode_batch(series_name, series_name_arabic, season_num, start_ep, end_ep, download_dir):
+    """Process a batch of episodes"""
+    successful = 0
+    failed = []
+    total = end_ep - start_ep + 1
+    
+    for episode_num in range(start_ep, end_ep + 1):
+        current = episode_num - start_ep + 1
+        
+        print(f"\n[Episode {current}/{total}] Processing episode {episode_num:02d}")
+        print("─" * 50)
+        
+        # Generate URL for this episode
+        if season_num > 1:
+            url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-s{season_num:02d}e{episode_num:02d}"
+        else:
+            url = f"https://z.3seq.cam/video/modablaj-{series_name}-episode-{episode_num:02d}"
+        
+        start_time = time.time()
+        
+        # Use the single URL processing function
+        temp_file = os.path.join(download_dir, f"temp_s{season_num:02d}e{episode_num:02d}.mp4")
+        final_file = os.path.join(download_dir, f"final_s{season_num:02d}e{episode_num:02d}.mp4")
+        thumbnail_file = os.path.join(download_dir, f"thumb_s{season_num:02d}e{episode_num:02d}.jpg")
+        
+        # Clean old files
+        for f in [temp_file, final_file, thumbnail_file]:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except:
+                    pass
+        
+        try:
+            # Extract video URL from page (handles redirects and random suffixes)
+            print(f"🔍 Fetching: {url}")
+            video_url, message = extract_video_url_from_page(url)
+            
+            if not video_url:
+                failed.append(episode_num)
+                print(f"❌ Episode {episode_num:02d}: {message}")
+                continue
+            
+            # Download
+            if not download_video(video_url, temp_file):
+                failed.append(episode_num)
+                print(f"❌ Episode {episode_num:02d}: Download failed")
+                continue
+            
+            # Create thumbnail
+            create_thumbnail(temp_file, thumbnail_file)
+            
+            # Compress
+            if not compress_video(temp_file, final_file):
+                print("⚠️ Compression failed, using original")
+                shutil.copy2(temp_file, final_file)
+            
+            # Upload
+            caption = f"{series_name_arabic} الموسم {season_num} الحلقة {episode_num}"
+            thumb = thumbnail_file if os.path.exists(thumbnail_file) else None
+            
+            if await upload_video(final_file, caption, thumb):
+                successful += 1
+                elapsed = time.time() - start_time
+                print(f"✅ Episode {episode_num:02d}: Uploaded successfully")
+                print(f"   ⏱️ Processing time: {elapsed:.1f} seconds")
+            else:
+                failed.append(episode_num)
+                print(f"❌ Episode {episode_num:02d}: Upload failed")
+            
+            # Clean up
+            for file_path in [temp_file, final_file, thumbnail_file]:
+                if os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except:
+                        pass
+            
+        except Exception as e:
+            failed.append(episode_num)
+            print(f"❌ Episode {episode_num:02d}: Error - {str(e)[:100]}")
+            # Clean up on error
+            for file_path in [temp_file, final_file, thumbnail_file]:
+                if os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except:
+                        pass
+        
+        # Wait between episodes
+        if episode_num < end_ep:
+            wait_time = 3
+            print(f"⏳ Waiting {wait_time} seconds before next episode...")
+            await asyncio.sleep(wait_time)
+    
+    return successful, failed, total
 
 # ===== MAIN FUNCTION =====
 
 async def main():
     """Main function"""
     print("="*50)
-    print("🎬 GitHub Video Processor v2.0")
+    print("🎬 GitHub Video Processor v3.1")
+    print("   Handles random URL suffixes like -avxn")
     print("="*50)
+    
+    # Setup argument parser
+    parser = argparse.ArgumentParser(description='Download and upload videos from 3seq.cam')
+    parser.add_argument('--url', type=str, help='Single URL to process')
+    parser.add_argument('--config', type=str, default='series_config.json', 
+                       help='Config file for batch processing')
+    parser.add_argument('--mode', type=str, choices=['single', 'batch'], default='batch',
+                       help='Processing mode: single URL or batch')
+    
+    args = parser.parse_args()
     
     # Check dependencies
     print("\n🔍 Checking dependencies...")
@@ -573,112 +967,113 @@ async def main():
         print("❌ Cannot continue without Telegram connection")
         return
     
-    # Load configuration
-    config_file = "series_config.json"
-    if not os.path.exists(config_file):
-        print(f"❌ Config file not found: {config_file}")
-        print("💡 Creating sample config...")
-        
-        sample_config = {
-            "series_name": "the-protector",
-            "series_name_arabic": "المحافظ",
-            "season_num": 2,
-            "start_episode": 1,
-            "end_episode": 8
-        }
-        
-        with open(config_file, 'w', encoding='utf-8') as f:
-            json.dump(sample_config, f, ensure_ascii=False, indent=2)
-        
-        print(f"✅ Created {config_file} with sample data")
-        print("⚠️ Please edit the config file and run again")
-        return
-    
-    try:
-        with open(config_file, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-    except Exception as e:
-        print(f"❌ Error reading config: {e}")
-        return
-    
-    series_name = config.get("series_name", "").strip()
-    series_name_arabic = config.get("series_name_arabic", "").strip()
-    season_num = int(config.get("season_num", 1))
-    start_ep = int(config.get("start_episode", 1))
-    end_ep = int(config.get("end_episode", 1))
-    
-    if not series_name or not series_name_arabic:
-        print("❌ Invalid series configuration")
-        return
-    
-    if start_ep > end_ep:
-        print("❌ Start episode must be less than end episode")
-        return
-    
     # Create working directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     download_dir = f"downloads_{timestamp}"
     os.makedirs(download_dir, exist_ok=True)
     
-    print(f"\n{'='*50}")
-    print("🚀 Starting Video Processing")
-    print('='*50)
-    print(f"📺 Series: {series_name_arabic}")
-    print(f"🌐 English name: {series_name}")
-    print(f"🎬 Season: {season_num}")
-    print(f"📈 Episodes: {start_ep} to {end_ep} (total: {end_ep - start_ep + 1})")
-    print(f"📁 Working dir: {download_dir}")
-    print(f"⏰ Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # Process episodes
-    successful = 0
-    failed = []
-    total = end_ep - start_ep + 1
-    
-    for episode_num in range(start_ep, end_ep + 1):
-        current = episode_num - start_ep + 1
+    # Process based on mode
+    if args.mode == 'single' and args.url:
+        print(f"\n{'='*50}")
+        print("🚀 Processing Single URL")
+        print('='*50)
+        print(f"🔗 URL: {args.url}")
         
-        print(f"\n[Episode {current}/{total}] Processing episode {episode_num:02d}")
-        print("─" * 50)
+        # Extract info from URL for display
+        season_num, episode_num, series_name = extract_season_episode_from_url(args.url)
+        if season_num and episode_num:
+            series_name_arabic = get_arabic_series_name(series_name)
+            print(f"📺 Series: {series_name_arabic}")
+            print(f"🌐 English name: {series_name}")
+            print(f"🎬 Season: {season_num}")
+            print(f"📺 Episode: {episode_num}")
         
-        start_time = time.time()
-        success, message = await process_episode(
-            episode_num, series_name, series_name_arabic, season_num, download_dir
-        )
+        print(f"📁 Working dir: {download_dir}")
+        print(f"⏰ Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
-        elapsed = time.time() - start_time
+        success, message = await process_single_url(args.url, download_dir)
         
         if success:
-            successful += 1
-            print(f"✅ Episode {episode_num:02d}: {message}")
-            print(f"   ⏱️ Processing time: {elapsed:.1f} seconds")
+            print(f"\n✅ Success: {message}")
         else:
-            failed.append(episode_num)
-            print(f"❌ Episode {episode_num:02d}: {message}")
-        
-        # Wait between episodes (to avoid rate limits)
-        if episode_num < end_ep:
-            wait_time = 3
-            print(f"⏳ Waiting {wait_time} seconds before next episode...")
-            await asyncio.sleep(wait_time)
+            print(f"\n❌ Failed: {message}")
     
-    # Results summary
-    print(f"\n{'='*50}")
-    print("📊 Processing Summary")
-    print('='*50)
-    print(f"✅ Successful: {successful}/{total}")
-    print(f"❌ Failed: {len(failed)}")
-    
-    if successful == total:
-        print("🎉 All episodes processed successfully!")
-    elif successful > 0:
-        print(f"⚠️ Partially successful ({successful}/{total})")
     else:
-        print("💥 All episodes failed!")
-    
-    if failed:
-        print(f"📝 Failed episodes: {failed}")
-        print("💡 You can rerun the workflow for failed episodes only")
+        # Batch processing mode
+        config_file = args.config
+        
+        if not os.path.exists(config_file):
+            print(f"❌ Config file not found: {config_file}")
+            print("💡 Creating sample config...")
+            
+            sample_config = {
+                "series_name": "kiralik-ask",
+                "series_name_arabic": "حب للايجار",
+                "season_num": 1,
+                "start_episode": 1,
+                "end_episode": 89
+            }
+            
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(sample_config, f, ensure_ascii=False, indent=2)
+            
+            print(f"✅ Created {config_file} with sample data")
+            print("⚠️ Please edit the config file and run again")
+            return
+        
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+        except Exception as e:
+            print(f"❌ Error reading config: {e}")
+            return
+        
+        series_name = config.get("series_name", "").strip()
+        series_name_arabic = config.get("series_name_arabic", "").strip()
+        season_num = int(config.get("season_num", 1))
+        start_ep = int(config.get("start_episode", 1))
+        end_ep = int(config.get("end_episode", 1))
+        
+        if not series_name or not series_name_arabic:
+            print("❌ Invalid series configuration")
+            return
+        
+        if start_ep > end_ep:
+            print("❌ Start episode must be less than end episode")
+            return
+        
+        print(f"\n{'='*50}")
+        print("🚀 Starting Batch Processing")
+        print('='*50)
+        print(f"📺 Series: {series_name_arabic}")
+        print(f"🌐 English name: {series_name}")
+        print(f"🎬 Season: {season_num}")
+        print(f"📈 Episodes: {start_ep} to {end_ep} (total: {end_ep - start_ep + 1})")
+        print(f"📁 Working dir: {download_dir}")
+        print(f"⏰ Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Process episodes
+        successful, failed, total = await process_episode_batch(
+            series_name, series_name_arabic, season_num, start_ep, end_ep, download_dir
+        )
+        
+        # Results summary
+        print(f"\n{'='*50}")
+        print("📊 Processing Summary")
+        print('='*50)
+        print(f"✅ Successful: {successful}/{total}")
+        print(f"❌ Failed: {len(failed)}")
+        
+        if successful == total:
+            print("🎉 All episodes processed successfully!")
+        elif successful > 0:
+            print(f"⚠️ Partially successful ({successful}/{total})")
+        else:
+            print("💥 All episodes failed!")
+        
+        if failed:
+            print(f"📝 Failed episodes: {failed}")
+            print("💡 You can rerun the workflow for failed episodes only")
     
     # Cleanup empty directory
     try:
